@@ -6,7 +6,7 @@ import { HLS_BEACON_INTERVAL_MS, HLS_QUALITY_STORAGE_KEY, LOW_LATENCY_STORAGE_KE
 import { readLocalStorage } from "../../storage.ts";
 import { ensureViewerId } from "../../player-shared/viewer-id.ts";
 import { needsCredentials } from "../../player-shared/needs-credentials.ts";
-import { beatUrl, beatVariants, ladderGrew, newLadderWatch } from "../../player-shared/hls-beat.ts";
+import { beatEdgeLowLatency, beatUrl, beatVariants, ladderGrew, newLadderWatch } from "../../player-shared/hls-beat.ts";
 import { loadSourceOnce } from "../../player-shared/source-once.ts";
 import { captchaQuery } from "../../captcha.ts";
 import { beginTransport, fullTeardown, goOffline, resetRetryBackoff, restartAfterFailure, setPoster, setState, suspendForPause } from "./lifecycle.ts";
@@ -17,7 +17,7 @@ import { parseLockedVariants, streamQualityText } from "../../quality.ts";
 import { isPhoneUA, type LatencyWindow } from "./latency-window.ts";
 import { lowLatencyStallGraceMs } from "./far-tier.ts";
 import { plainHlsTuning, plainLevelWindow, plainPlayerSetup } from "./plain-setup.ts";
-import { edgeLowLatencyReprobeMs, edgeLowLatencyUpgrade, edgeReprobeDue, partsTransition, watchesEdgeLowLatencyOffer, type ReprobeView } from "./edge-low-latency.ts";
+import { edgeOfferWatch, partsTransition, watchesEdgeLowLatencyOffer, type ReprobeView } from "./edge-low-latency.ts";
 import { bufferedAheadOf, STARTUP_RUNWAY_S, startupHoldOver } from "./startup-hold.ts";
 import { updateSeekBar } from "../seekbar.ts";
 import { LL_STARTUP_RUNWAY_S, lowLatencyChosen, lowLatencyHlsConfig, lowLatencyRequested, masterMode, newLowLatencyTrim, trimLowLatency } from "../../player-shared/low-latency.ts";
@@ -32,13 +32,18 @@ function sendHLSBeat(g: number): void {
     void Promise.all([captchaQuery(), ensureViewerId(ctx.mediaBase, ctx.username)]).then(async ([tq, vid]) => {
         if (!isCurrent(g)) return;
         const res = await fetch(beatUrl(ctx.mediaBase, ctx.username, vid, tq), { method: "POST", credentials: "include" });
-        const variants = beatVariants(res.status, await res.text());
+        const body = await res.text();
         if (!isCurrent(g)) return;
-        if (hlsInstance && ladderGrew(ladderWatch, variants, video.paused)) beginTransport();
+        if (hlsInstance && ladderGrew(ladderWatch, beatVariants(res.status, body), video.paused)) {
+            beginTransport();
+            return;
+        }
+        edgeOfferBeat?.(beatEdgeLowLatency(res.status, body));
     }).catch(() => {});
 }
 
 const ladderWatch = newLadderWatch();
+let edgeOfferBeat: ((edgeLowLatency: boolean) => void) | null = null;
 
 let hlsBeaconTimer: number | null = null;
 
@@ -158,38 +163,21 @@ function reprobeView(): ReprobeView {
 }
 
 function watchEdgeLowLatencyOffer(g: number, hls: Hls): void {
-    let attempt = 0;
-    let timer: number | null = null;
-    const live = () => isCurrent(g) && hlsInstance === hls;
-    const schedule = () => {
-        timer = window.setTimeout(probe, edgeLowLatencyReprobeMs(attempt));
-        attempt += 1;
-    };
-    const probe = () => {
-        timer = null;
-        if (!live()) return;
-        if (!edgeReprobeDue(reprobeView()) || !ctx.edgeServed || !lowLatencyWanted()) {
-            schedule();
-            return;
-        }
-        void buildMasterUrl(true)
+    const onBeat = edgeOfferWatch({
+        live: () => isCurrent(g) && hlsInstance === hls,
+        wanted: () => ctx.edgeServed && lowLatencyWanted(),
+        view: reprobeView,
+        fetchMaster: () => buildMasterUrl(true)
             .then((url) => fetch(url, { credentials: "include" }))
-            .then((res) => (res.ok ? res.text() : ""))
-            .catch(() => "")
-            .then((body) => {
-                if (!live()) return;
-                if (!edgeLowLatencyUpgrade(body, reprobeView())) {
-                    schedule();
-                    return;
-                }
-                console.log("live: edge now offers low latency, switching to the parts playlist");
-                beginTransport();
-            });
-    };
-    schedule();
+            .then((res) => (res.ok ? res.text() : null)),
+        switchToLowLatency: () => {
+            console.log("live: edge now offers low latency, switching to the parts playlist");
+            beginTransport();
+        },
+    });
+    edgeOfferBeat = onBeat;
     track(() => {
-        if (timer !== null) window.clearTimeout(timer);
-        timer = null;
+        if (edgeOfferBeat === onBeat) edgeOfferBeat = null;
     });
 }
 

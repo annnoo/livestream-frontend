@@ -1,12 +1,5 @@
 import { masterOffersLowLatency } from "../../player-shared/low-latency.ts";
 
-export const EDGE_LL_REPROBE_FIRST_MS = 15000;
-export const EDGE_LL_REPROBE_EVERY_MS = 60000;
-
-export function edgeLowLatencyReprobeMs(attempt: number): number {
-    return attempt <= 0 ? EDGE_LL_REPROBE_FIRST_MS : EDGE_LL_REPROBE_EVERY_MS;
-}
-
 export function watchesEdgeLowLatencyOffer(requested: boolean, edgeServed: boolean, chosen: boolean): boolean {
     return requested && edgeServed && !chosen;
 }
@@ -23,6 +16,38 @@ export function edgeReprobeDue(view: ReprobeView): boolean {
 
 export function edgeLowLatencyUpgrade(masterBody: string, view: ReprobeView): boolean {
     return edgeReprobeDue(view) && masterOffersLowLatency(masterBody);
+}
+
+export interface EdgeOfferWatchDeps {
+    live(): boolean;
+    wanted(): boolean;
+    view(): ReprobeView;
+    fetchMaster(): Promise<string | null>;
+    switchToLowLatency(): void;
+}
+
+export function edgeOfferWatch(deps: EdgeOfferWatchDeps): (edgeLowLatency: boolean) => void {
+    let checking = false;
+    let declined = false;
+    return (edgeLowLatency) => {
+        if (!edgeLowLatency) {
+            declined = false;
+            return;
+        }
+        if (checking || declined || !deps.live() || !deps.wanted() || !edgeReprobeDue(deps.view())) return;
+        checking = true;
+        void deps.fetchMaster()
+            .catch(() => null)
+            .then((body) => {
+                checking = false;
+                if (body === null || !deps.live()) return;
+                if (!masterOffersLowLatency(body)) {
+                    declined = true;
+                    return;
+                }
+                if (edgeLowLatencyUpgrade(body, deps.view())) deps.switchToLowLatency();
+            });
+    };
 }
 
 export type PartsTransition = "withdrawn" | "restored" | null;

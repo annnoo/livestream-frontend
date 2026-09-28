@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import * as edgeLowLatency from "../src/live/player/edge-low-latency.ts";
 import {
-    EDGE_LL_REPROBE_EVERY_MS,
-    EDGE_LL_REPROBE_FIRST_MS,
-    edgeLowLatencyReprobeMs,
     edgeLowLatencyUpgrade,
+    edgeOfferWatch,
     edgeReprobeDue,
     partsTransition,
     watchesEdgeLowLatencyOffer,
+    type ReprobeView,
 } from "../src/live/player/edge-low-latency.ts";
+import { beatEdgeLowLatency, beatVariants } from "../src/player-shared/hls-beat.ts";
 import { lowLatencyChosen, lowLatencyRequested, masterMode, masterOffersLowLatency } from "../src/player-shared/low-latency.ts";
 import { probeOutcome, startPathFor } from "../src/live/player/master-probe.ts";
 import { DEFAULT_LIVE_WINDOW, FAR_LIVE_WINDOW, plainHlsTuning, plainLevelWindow, plainPlayerSetup, TIGHT_LIVE_WINDOW } from "../src/live/player/plain-setup.ts";
@@ -197,14 +198,6 @@ describe("re-probing the edge for its offer", () => {
         expect(watchesEdgeLowLatencyOffer(true, false, false)).toBe(false);
     });
 
-    test("the first re-probe comes after the edge's pull warm-up, later ones once a minute", () => {
-        expect(edgeLowLatencyReprobeMs(0)).toBe(EDGE_LL_REPROBE_FIRST_MS);
-        expect(edgeLowLatencyReprobeMs(1)).toBe(EDGE_LL_REPROBE_EVERY_MS);
-        expect(edgeLowLatencyReprobeMs(40)).toBe(EDGE_LL_REPROBE_EVERY_MS);
-        expect(EDGE_LL_REPROBE_FIRST_MS).toBeGreaterThanOrEqual(10000);
-        expect(EDGE_LL_REPROBE_EVERY_MS).toBeGreaterThanOrEqual(60000);
-    });
-
     test("no re-probe while paused, behind live or hidden", () => {
         expect(edgeReprobeDue(view)).toBe(true);
         expect(edgeReprobeDue({ ...view, paused: true })).toBe(false);
@@ -218,5 +211,168 @@ describe("re-probing the edge for its offer", () => {
         expect(edgeLowLatencyUpgrade("", view)).toBe(false);
         expect(edgeLowLatencyUpgrade(OFFERED["zone"], { ...view, paused: true })).toBe(false);
         expect(edgeLowLatencyUpgrade(OFFERED["zone"], { ...view, behindLive: true })).toBe(false);
+    });
+});
+
+const TODAY_BEAT = JSON.stringify({ variants: 3 });
+const OFFER_BEAT = JSON.stringify({ variants: 3, edgeLL: true });
+
+class OfferHarness {
+    fetches = 0;
+    switches = 0;
+    view: ReprobeView = { paused: false, behindLive: false, visible: true };
+    wanted = true;
+    live = true;
+    master: string | null = OFFERED["zone"];
+    pending: Array<() => void> = [];
+    beat = edgeOfferWatch({
+        live: () => this.live,
+        wanted: () => this.wanted,
+        view: () => this.view,
+        fetchMaster: () => {
+            this.fetches += 1;
+            const body = this.master;
+            return new Promise((resolve) => this.pending.push(() => resolve(body)));
+        },
+        switchToLowLatency: () => {
+            this.switches += 1;
+            this.live = false;
+        },
+    });
+
+    send(status: number, body: string): void {
+        this.beat(beatEdgeLowLatency(status, body));
+    }
+
+    async answer(): Promise<void> {
+        for (const resolve of this.pending.splice(0)) resolve();
+        for (let i = 0; i < 5; i++) await Promise.resolve();
+    }
+}
+
+describe("the beat reply carries the edge's low latency offer", () => {
+    test("only a literal edgeLL true on a 200 reply is an offer", () => {
+        expect(beatEdgeLowLatency(200, OFFER_BEAT)).toBe(true);
+        expect(beatEdgeLowLatency(200, TODAY_BEAT)).toBe(false);
+        expect(beatEdgeLowLatency(200, JSON.stringify({ variants: 3, edgeLL: false }))).toBe(false);
+        for (const garbage of ["true", "1", 1, "yes", null, {}, [true]]) {
+            expect(beatEdgeLowLatency(200, JSON.stringify({ variants: 3, edgeLL: garbage }))).toBe(false);
+        }
+        expect(beatEdgeLowLatency(204, "")).toBe(false);
+        expect(beatEdgeLowLatency(200, "")).toBe(false);
+        expect(beatEdgeLowLatency(200, "not json")).toBe(false);
+        expect(beatEdgeLowLatency(200, "null")).toBe(false);
+        expect(beatEdgeLowLatency(200, "true")).toBe(false);
+        expect(beatEdgeLowLatency(404, OFFER_BEAT)).toBe(false);
+    });
+
+    test("the variant count reads the same with or without the field", () => {
+        expect(beatVariants(200, OFFER_BEAT)).toBe(3);
+        expect(beatVariants(200, TODAY_BEAT)).toBe(3);
+    });
+
+    test("there is no timed master poll left", () => {
+        expect(Object.keys(edgeLowLatency).filter((name) => /REPROBE|ReprobeMs/.test(name))).toEqual([]);
+    });
+});
+
+describe("a plain edge viewer follows the offer in the beat", () => {
+    test("beats without the field never fetch the master", async () => {
+        const h = new OfferHarness();
+        for (let beat = 0; beat < 20; beat++) {
+            h.send(200, TODAY_BEAT);
+            h.send(204, "");
+            h.send(200, JSON.stringify({ variants: 3, edgeLL: "true" }));
+            await h.answer();
+        }
+        expect(h.fetches).toBe(0);
+        expect(h.switches).toBe(0);
+    });
+
+    test("a beat with the offer fetches the master once and switches", async () => {
+        const h = new OfferHarness();
+        h.send(200, TODAY_BEAT);
+        h.send(200, OFFER_BEAT);
+        h.send(200, OFFER_BEAT);
+        expect(h.fetches).toBe(1);
+        await h.answer();
+        expect(h.switches).toBe(1);
+        h.send(200, OFFER_BEAT);
+        await h.answer();
+        expect(h.fetches).toBe(1);
+        expect(h.switches).toBe(1);
+    });
+
+    test("a master whose variant lacks ll=1 is not taken and is not fetched again until the offer returns", async () => {
+        const h = new OfferHarness();
+        h.master = NOT_OFFERED["zone"];
+        h.send(200, OFFER_BEAT);
+        await h.answer();
+        h.send(200, OFFER_BEAT);
+        await h.answer();
+        expect([h.fetches, h.switches]).toEqual([1, 0]);
+        h.send(200, TODAY_BEAT);
+        h.master = OFFERED["zone"];
+        h.send(200, OFFER_BEAT);
+        await h.answer();
+        expect([h.fetches, h.switches]).toEqual([2, 1]);
+    });
+
+    test("a failed master fetch is tried again on the next offering beat", async () => {
+        const h = new OfferHarness();
+        h.master = null;
+        h.send(200, OFFER_BEAT);
+        await h.answer();
+        expect([h.fetches, h.switches]).toEqual([1, 0]);
+        h.master = OFFERED["zone"];
+        h.send(200, OFFER_BEAT);
+        await h.answer();
+        expect([h.fetches, h.switches]).toEqual([2, 1]);
+    });
+
+    test("no fetch while paused, behind live or hidden, and the next offering beat after that switches", async () => {
+        for (const held of [{ paused: true }, { behindLive: true }, { visible: false }]) {
+            const h = new OfferHarness();
+            h.view = { ...h.view, ...held };
+            h.send(200, OFFER_BEAT);
+            await h.answer();
+            expect(h.fetches).toBe(0);
+            h.view = { paused: false, behindLive: false, visible: true };
+            h.send(200, OFFER_BEAT);
+            await h.answer();
+            expect([h.fetches, h.switches]).toEqual([1, 1]);
+        }
+    });
+
+    test("a viewer who paused while the master was in flight stays put and switches on a later beat", async () => {
+        const h = new OfferHarness();
+        h.send(200, OFFER_BEAT);
+        h.view = { ...h.view, paused: true };
+        await h.answer();
+        expect([h.fetches, h.switches]).toEqual([1, 0]);
+        h.view = { ...h.view, paused: false };
+        h.send(200, OFFER_BEAT);
+        await h.answer();
+        expect([h.fetches, h.switches]).toEqual([2, 1]);
+    });
+
+    test("an opted out viewer or a replaced transport never fetches", async () => {
+        const optedOut = new OfferHarness();
+        optedOut.wanted = false;
+        optedOut.send(200, OFFER_BEAT);
+        const replaced = new OfferHarness();
+        replaced.live = false;
+        replaced.send(200, OFFER_BEAT);
+        await optedOut.answer();
+        await replaced.answer();
+        expect(optedOut.fetches + replaced.fetches).toBe(0);
+    });
+
+    test("a transport replaced while the master was in flight does not switch", async () => {
+        const h = new OfferHarness();
+        h.send(200, OFFER_BEAT);
+        h.live = false;
+        await h.answer();
+        expect([h.fetches, h.switches]).toEqual([1, 0]);
     });
 });

@@ -2,16 +2,23 @@ export function beatUrl(mediaBase: string, username: string, viewerId: string, c
     return `${mediaBase}/hls/${encodeURIComponent(username)}/beat?id=${encodeURIComponent(viewerId)}${captchaQuery}`;
 }
 
-export function beatVariants(status: number, body: string): number | null {
+function beatReply(status: number, body: string): Record<string, unknown> | null {
     if (status !== 200 || !body) return null;
     try {
         const parsed: unknown = JSON.parse(body);
-        if (typeof parsed !== "object" || parsed === null) return null;
-        const variants = (parsed as { variants?: unknown }).variants;
-        return typeof variants === "number" && Number.isInteger(variants) && variants >= 0 ? variants : null;
+        return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null;
     } catch {
         return null;
     }
+}
+
+export function beatVariants(status: number, body: string): number | null {
+    const variants = beatReply(status, body)?.variants;
+    return typeof variants === "number" && Number.isInteger(variants) && variants >= 0 ? variants : null;
+}
+
+export function beatEdgeLowLatency(status: number, body: string): boolean {
+    return beatReply(status, body)?.edgeLL === true;
 }
 
 export interface LadderWatch {
