@@ -3,7 +3,7 @@ import Hls from "hls.js";
 import { video } from "../dom.ts";
 import { ctx, isCurrent, track } from "./context.ts";
 import { HLS_BEACON_INTERVAL_MS, HLS_QUALITY_STORAGE_KEY, LOW_LATENCY_STORAGE_KEY, PAUSE_SUSPEND_MS, PRUNE_KEEP_S, WAITING_STALL_MS } from "../constants.ts";
-import { readLocalStorage, writeLocalStorage } from "../../storage.ts";
+import { readLocalStorage } from "../../storage.ts";
 import { ensureViewerId } from "../../player-shared/viewer-id.ts";
 import { needsCredentials } from "../../player-shared/needs-credentials.ts";
 import { beatUrl, beatVariants, ladderGrew, newLadderWatch } from "../../player-shared/hls-beat.ts";
@@ -146,19 +146,13 @@ export function lowLatencyWanted(): boolean {
     return lowLatencyAvailable() && lowLatencyPreferred();
 }
 
-export function setLowLatencyPreferred(on: boolean): void {
-    writeLocalStorage(LOW_LATENCY_STORAGE_KEY, on ? "1" : "0");
-    if (ctx.terminal || ctx.transportKind === "none" || ctx.transportKind === "unsupported") return;
-    beginTransport();
-}
-
 async function buildMasterUrl(): Promise<string> {
     const tq = await captchaQuery();
     return `${ctx.mediaBase}/hls/${encodeURIComponent(ctx.username)}/master.m3u8?${masterMode(lowLatencyWanted())}${tq}`;
 }
 
 function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | null): void {
-    console.log("live: hls low latency, parts via cdn, blocking playlist on origin");
+    console.log("live: hls low latency, parts playlist and media via the region's cdn zone");
     setStallGraceMs(WAITING_STALL_MS);
     const hls = new Hls(lowLatencyHlsConfig(Hls.DefaultConfig.loader, primed, PRUNE_KEEP_S, (url) => needsCredentials(url, ctx.mediaBase, location.origin)));
     hlsInstance = hls;
