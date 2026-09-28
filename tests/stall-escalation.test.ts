@@ -4,10 +4,10 @@ import {
     MEDIA_RECOVERY_COOLDOWN_MS,
     nextStallCheckMs,
     nudgeSeekTarget,
+    stallCheck,
     stallEpisodeOnPlaying,
     stallEpisodeOnWaiting,
     stallLadder,
-    stallRecovered,
     stallStepDue,
     stallTeardownMs,
     type StallEpisode,
@@ -88,12 +88,64 @@ test("nudge never seeks backwards, without a sync point, or while behind live", 
     expect(nudgeSeekTarget(10, 14, [{ start: 9, end: 20 }], true)).toBeNull();
 });
 
-test("a stall counts as recovered only with fresh progress or a pause", () => {
-    expect(stallRecovered(250, false)).toBe(true);
-    expect(stallRecovered(1999, false)).toBe(true);
-    expect(stallRecovered(2000, false)).toBe(false);
-    expect(stallRecovered(4000, false)).toBe(false);
-    expect(stallRecovered(60000, true)).toBe(true);
+const ladder8 = stallLadder(8000, true);
+
+test("a check drops the episode on a pause or on fresh progress with no step taken", () => {
+    const episode = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stallCheck(ladder8, episode, 4000, 0, true)).toEqual({ kind: "drop" });
+    expect(stallCheck(ladder8, episode, 4000, 3000, false)).toEqual({ kind: "drop" });
+    expect(stallCheck(ladder8, episode, 4000, 0, false)).toEqual({ kind: "step", step: "reload", taken: 1 });
+    expect(stallCheck(ladder8, episode, 3000, 0, false)).toEqual({ kind: "wait" });
+});
+
+test("a re-stall under 2 s after resuming still takes the next step at its check", () => {
+    const episode = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stepAt(episode, 4000)).toBe("reload");
+    stallEpisodeOnPlaying(episode, 4500);
+    expect(stallEpisodeOnWaiting(episode, 6400, 6400)).toBe(episode);
+    expect(stallCheck(ladder8, episode, 8000, 6400, false)).toEqual({ kind: "step", step: "recover-media", taken: 2 });
+});
+
+test("the nudge's own progress does not count as recovered at the next check", () => {
+    const episode = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stepAt(episode, 4000)).toBe("reload");
+    expect(stallCheck(ladder8, episode, 8000, 4050, false)).toEqual({ kind: "step", step: "recover-media", taken: 2 });
+});
+
+test("a check during a brief resume holds the episode and the next stall takes the next step", () => {
+    const episode = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stepAt(episode, 4000)).toBe("reload");
+    stallEpisodeOnPlaying(episode, 7500);
+    expect(stallCheck(ladder8, episode, 8000, 7900, false)).toEqual({ kind: "hold" });
+    expect(stallEpisodeOnWaiting(episode, 8500, 8500)).toBe(episode);
+    expect(nextStallCheckMs(ladder8, 8500 - episode.startedAt, episode.taken)).toBe(0);
+    expect(stallCheck(ladder8, episode, 8500, 8500, false)).toEqual({ kind: "step", step: "recover-media", taken: 2 });
+});
+
+test("a stutter loop climbs the whole ladder to the teardown", () => {
+    const episode = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stepAt(episode, 4000)).toBe("reload");
+    stallEpisodeOnPlaying(episode, 4500);
+    stallEpisodeOnWaiting(episode, 6400, 6400);
+    const media = stallCheck(ladder8, episode, 8000, 6400, false);
+    expect(media).toEqual({ kind: "step", step: "recover-media", taken: 2 });
+    episode.taken = 2;
+    stallEpisodeOnPlaying(episode, 8500);
+    expect(stallEpisodeOnWaiting(episode, 10000, 10000)).toBe(episode);
+    expect(stallCheck(ladder8, episode, 12000, 10000, false)).toEqual({ kind: "step", step: "teardown", taken: 3 });
+});
+
+test("playback that ran 2 s past playing drops the episode at the check", () => {
+    const episode = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stepAt(episode, 4000)).toBe("reload");
+    stallEpisodeOnPlaying(episode, 4500);
+    expect(stallCheck(ladder8, episode, 8000, 7900, false)).toEqual({ kind: "drop" });
+});
+
+test("progress after a step without a playing event drops the episode at the check", () => {
+    const episode = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stepAt(episode, 4000)).toBe("reload");
+    expect(stallCheck(ladder8, episode, 8000, 7900, false)).toEqual({ kind: "drop" });
 });
 
 function stepAt(episode: StallEpisode, now: number): StallStep | null {

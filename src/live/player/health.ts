@@ -4,7 +4,7 @@ import { ctx, isCurrent, track } from "./context.ts";
 import { HEALTH_CHECK_INTERVAL_MS, HEALTH_STALE_MS, HEALTH_STUCK_MS, WAITING_STALL_MS } from "../constants.ts";
 import { beginTransport, clearRetryTimer, restartAfterFailure } from "./lifecycle.ts";
 import { hlsLiveSyncPosition, recoverHlsMedia, resumeHlsLoad } from "./hls.ts";
-import { mediaErrorStep, nextStallCheckMs, nudgeSeekTarget, stallEpisodeOnPlaying, stallEpisodeOnWaiting, stallLadder, stallRecovered, stallStepDue, stallTeardownMs, type StallEpisode, type StallRung, type StallStep } from "./stall-escalation.ts";
+import { mediaErrorStep, nextStallCheckMs, nudgeSeekTarget, stallCheck, stallEpisodeOnPlaying, stallEpisodeOnWaiting, stallLadder, stallTeardownMs, type StallEpisode, type StallRung, type StallStep } from "./stall-escalation.ts";
 
 let waitingTimer: number | null = null;
 let stallGraceMs = WAITING_STALL_MS;
@@ -122,14 +122,15 @@ function runStallCheck(g: number): void {
     if (!isCurrent(g)) return;
     const episode = stallEpisode;
     if (!episode) return;
-    if (stallRecovered(Date.now() - ctx.lastProgressAt, video.paused)) {
+    const check = stallCheck(currentStallLadder(), episode, Date.now(), ctx.lastProgressAt, video.paused);
+    if (check.kind === "drop") {
         stallEpisode = null;
         return;
     }
-    const due = stallStepDue(currentStallLadder(), Date.now() - episode.startedAt, episode.taken);
-    if (due) {
-        episode.taken = due.taken;
-        applyStallStep(g, due.step);
+    if (check.kind === "hold") return;
+    if (check.kind === "step") {
+        episode.taken = check.taken;
+        applyStallStep(g, check.step);
     }
     if (isCurrent(g) && stallEpisode === episode) scheduleStallCheck(g);
 }

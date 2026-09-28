@@ -11,21 +11,19 @@ export const MEDIA_RECOVERY_COOLDOWN_MS = 10000;
 export const NUDGE_MIN_AHEAD_S = 0.5;
 export const STALL_RECOVERED_WINDOW_MS = 2000;
 
-export function stallRecovered(sinceProgressMs: number, paused: boolean): boolean {
-    return paused || sinceProgressMs < STALL_RECOVERED_WINDOW_MS;
-}
-
 export interface StallEpisode {
     startedAt: number;
     progressAt: number;
+    waitingAt: number;
     taken: number;
     playingAt: number | null;
 }
 
 export function stallEpisodeOnWaiting(episode: StallEpisode | null, now: number, lastProgressAt: number): StallEpisode {
     if (!episode || !stallEpisodeContinues(episode, lastProgressAt)) {
-        return { startedAt: now, progressAt: lastProgressAt, taken: 0, playingAt: null };
+        return { startedAt: now, progressAt: lastProgressAt, waitingAt: now, taken: 0, playingAt: null };
     }
+    episode.waitingAt = now;
     return episode;
 }
 
@@ -36,6 +34,23 @@ function stallEpisodeContinues(episode: StallEpisode, lastProgressAt: number): b
 
 export function stallEpisodeOnPlaying(episode: StallEpisode | null, now: number): void {
     if (episode) episode.playingAt = now;
+}
+
+export type StallCheck =
+    | { kind: "drop" }
+    | { kind: "hold" }
+    | { kind: "wait" }
+    | { kind: "step"; step: StallStep; taken: number };
+
+export function stallCheck(ladder: StallRung[], episode: StallEpisode, now: number, lastProgressAt: number, paused: boolean): StallCheck {
+    if (paused) return { kind: "drop" };
+    const playingSinceWaiting = lastProgressAt > episode.waitingAt && now - lastProgressAt < STALL_RECOVERED_WINDOW_MS;
+    if (playingSinceWaiting) {
+        const resumedBriefly = episode.taken > 0 && episode.playingAt !== null && lastProgressAt - episode.playingAt < STALL_RECOVERED_WINDOW_MS;
+        return { kind: resumedBriefly ? "hold" : "drop" };
+    }
+    const due = stallStepDue(ladder, now - episode.startedAt, episode.taken);
+    return due ? { kind: "step", step: due.step, taken: due.taken } : { kind: "wait" };
 }
 
 export function stallLadder(graceMs: number, hlsJs: boolean): StallRung[] {
