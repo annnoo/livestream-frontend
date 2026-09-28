@@ -9,12 +9,38 @@ import { tokenCarriesLowLatency } from "./viewer-claim.ts";
 export const LL_STARTUP_RUNWAY_S = 1;
 export const LL_TRIM_TICK_MS = 500;
 
-export function lowLatencyAvailable(entitled: boolean, edgeServed: boolean): boolean {
-    return entitled && !edgeServed;
+export function lowLatencyRequested(entitled: boolean, edgeServed: boolean, native: boolean): boolean {
+    return entitled && !(edgeServed && native);
 }
 
-export function lowLatencyForToken(token: string | null, edgeServed: boolean): boolean {
-    return lowLatencyAvailable(tokenCarriesLowLatency(token), edgeServed);
+export function lowLatencyForToken(token: string | null, edgeServed: boolean, native: boolean): boolean {
+    return lowLatencyRequested(tokenCarriesLowLatency(token), edgeServed, native);
+}
+
+function variantUriOffersLowLatency(uri: string): boolean {
+    const q = uri.indexOf("?");
+    if (q < 0) return false;
+    const hash = uri.indexOf("#", q);
+    const query = hash < 0 ? uri.slice(q + 1) : uri.slice(q + 1, hash);
+    return new URLSearchParams(query).getAll("ll").includes("1");
+}
+
+export function masterOffersLowLatency(body: string): boolean {
+    const lines = body.split(/\r?\n/).map((line) => line.trim());
+    let variants = 0;
+    for (let i = 0; i < lines.length; i++) {
+        if (!lines[i].startsWith("#EXT-X-STREAM-INF:")) continue;
+        let j = i + 1;
+        while (j < lines.length && (lines[j] === "" || lines[j].startsWith("#"))) j++;
+        if (j >= lines.length || !variantUriOffersLowLatency(lines[j])) return false;
+        variants += 1;
+        i = j;
+    }
+    return variants > 0;
+}
+
+export function lowLatencyChosen(requested: boolean, edgeServed: boolean, masterBody: string): boolean {
+    return requested && (!edgeServed || masterOffersLowLatency(masterBody));
 }
 
 export function masterMode(lowLatency: boolean): "ll=1" | "prefetch=1" {

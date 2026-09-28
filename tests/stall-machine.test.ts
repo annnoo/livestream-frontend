@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { RECOVERY_LIVE_SEEK_WINDOW_MS, stallLadder } from "../src/live/player/stall-escalation.ts";
+import { lowLatencyStallGraceMs } from "../src/live/player/far-tier.ts";
+import { WAITING_STALL_MS } from "../src/live/constants.ts";
 import {
     newStallMachine,
     OWN_ACTION_SETTLE_MS,
@@ -132,6 +134,8 @@ class Sim {
 const G8: StallConfig = { graceMs: 8000, hlsJs: true };
 const G20: StallConfig = { graceMs: 20000, hlsJs: true };
 const NATIVE: StallConfig = { graceMs: 8000, hlsJs: false };
+const EDGE_LL: StallConfig = { graceMs: lowLatencyStallGraceMs(true, WAITING_STALL_MS), hlsJs: true };
+const ORIGIN_LL: StallConfig = { graceMs: lowLatencyStallGraceMs(false, WAITING_STALL_MS), hlsJs: true };
 
 function stutterUntilTeardown(sim: Sim, stallMs: number, playMs: number, limitMs: number): void {
     while (sim.now < limitMs && !sim.steps().some(([, s]) => s === "teardown")) {
@@ -156,6 +160,28 @@ describe("stall machine timings", () => {
         sim.send("waiting");
         sim.to(60000);
         expect(sim.steps()).toEqual([[10000, "reload"], [20000, "recover-media"], [30000, "teardown"]]);
+    });
+
+    test("edge low latency takes the far steps at 10, 20 and 30 s, origin low latency keeps 4, 8 and 12 s", () => {
+        const edge = new Sim(EDGE_LL);
+        edge.send("waiting");
+        edge.to(60000);
+        expect(edge.steps()).toEqual([[10000, "reload"], [20000, "recover-media"], [30000, "teardown"]]);
+        const origin = new Sim(ORIGIN_LL);
+        origin.send("waiting");
+        origin.to(60000);
+        expect(origin.steps()).toEqual([[4000, "reload"], [8000, "recover-media"], [12000, "teardown"]]);
+    });
+
+    test("an edge low latency viewer rides out the wait for the next released segment when the edge falls back", () => {
+        const sim = new Sim(EDGE_LL);
+        sim.playTo(3000);
+        sim.send("waiting");
+        sim.to(9500);
+        sim.send("playing");
+        sim.playTo(40000);
+        expect(sim.steps()).toEqual([]);
+        expect(sim.driver.open()).toBe(false);
     });
 
     test("native playback keeps a single teardown at G", () => {
@@ -272,7 +298,7 @@ describe("R1: an open episode always has a timer", () => {
 });
 
 describe("R1: a stutter loop climbs in bounded time", () => {
-    for (const [name, cfg] of [["G=8", G8], ["G=20", G20], ["native", NATIVE]] as const) {
+    for (const [name, cfg] of [["G=8", G8], ["G=20", G20], ["edge LL", EDGE_LL], ["native", NATIVE]] as const) {
         for (const [stallMs, playMs] of [[500, 1500], [100, 1900], [1500, 500], [1000, 1000]]) {
             test(`${name}: stalls of ${stallMs} ms between plays of ${playMs} ms`, () => {
                 const sim = new Sim(cfg);
@@ -544,6 +570,8 @@ describe("M1: a stall event that playback ran through", () => {
         ["G=8, after the first check", G8, 6000],
         ["G=20", G20, 9000],
         ["G=20, after the first check", G20, 12000],
+        ["edge LL", EDGE_LL, 9000],
+        ["edge LL, after the first check", EDGE_LL, 12000],
         ["native", NATIVE, 6000],
         ["native, after the first check", NATIVE, 9000],
     ] as const) {
@@ -652,7 +680,7 @@ describe("N1: a recover-media, live seek, stall cycle", () => {
         return sim;
     }
 
-    for (const [name, cfg] of [["G=8", G8], ["G=20", G20]] as const) {
+    for (const [name, cfg] of [["G=8", G8], ["G=20", G20], ["edge LL", EDGE_LL]] as const) {
         test(`${name}: an unplayable live edge gets one media recovery, then the teardown`, () => {
             const sim = cycle(cfg, 300000);
             const steps = sim.steps().map(([, s]) => s);
@@ -708,7 +736,7 @@ describe("an event that finds the teardown overdue", () => {
 });
 
 describe("N2: a stray playhead movement just before the first step", () => {
-    for (const [name, cfg] of [["G=8", G8], ["G=20", G20], ["native", NATIVE]] as const) {
+    for (const [name, cfg] of [["G=8", G8], ["G=20", G20], ["edge LL", EDGE_LL], ["native", NATIVE]] as const) {
         test(`${name}: the step is taken at the recheck when playback stayed silent`, () => {
             const ladder = stallLadder(cfg.graceMs, cfg.hlsJs);
             const first = ladder[0].atMs;
@@ -842,7 +870,7 @@ interface RealStallGuard {
 function runRandomSequence(seed: number): string | null {
     const rand = mulberry32(seed);
     const pick = <T>(items: readonly T[]): T => items[Math.floor(rand() * items.length)];
-    const cfg = pick([G8, G20, NATIVE]);
+    const cfg = pick([G8, G20, EDGE_LL, NATIVE]);
     const ladder = stallLadder(cfg.graceMs, cfg.hlsJs);
     const teardownRung = ladder[ladder.length - 1].atMs;
     const lateMs = pick([0, 0, 40, 150]);
@@ -998,6 +1026,16 @@ function runRandomSequence(seed: number): string | null {
     }
     return failure;
 }
+
+test("random event sequences cover the edge low latency grace", () => {
+    let edgeRuns = 0;
+    for (let run = 0; run < RANDOM_RUNS; run++) {
+        const rand = mulberry32(RANDOM_BASE_SEED + run);
+        if ([G8, G20, EDGE_LL, NATIVE][Math.floor(rand() * 4)] === EDGE_LL) edgeRuns += 1;
+    }
+    expect(EDGE_LL.graceMs).toBe(20000);
+    expect(edgeRuns).toBeGreaterThan(RANDOM_RUNS / 8);
+});
 
 test("random event sequences keep every stall invariant", () => {
     const failures: string[] = [];

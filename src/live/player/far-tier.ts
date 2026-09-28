@@ -9,6 +9,10 @@ export function stallGraceMsFor(tier: LatencyTier, baseMs: number): number {
     return tier === "far" ? Math.max(baseMs, FAR_STALL_GRACE_MS) : baseMs;
 }
 
+export function lowLatencyStallGraceMs(edgeServed: boolean, baseMs: number): number {
+    return edgeServed ? stallGraceMsFor("far", baseMs) : baseMs;
+}
+
 export function abrEstimateFor(tier: LatencyTier): number {
     return tier === "far" ? FAR_ABR_ESTIMATE_BPS : DEFAULT_ABR_ESTIMATE_BPS;
 }

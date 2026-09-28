@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { HlsConfig, LevelDetails } from "hls.js";
 import Hls from "hls.js";
-import { bufferedRangeEndAt, lowLatencyAvailable, lowLatencyForToken, lowLatencyHlsConfig, masterMode, newLowLatencyTrim, trimLowLatency, type BufferedRanges, type TrimmableHls } from "../src/player-shared/low-latency.ts";
+import { bufferedRangeEndAt, lowLatencyChosen, lowLatencyForToken, lowLatencyRequested, lowLatencyHlsConfig, masterMode, newLowLatencyTrim, trimLowLatency, type BufferedRanges, type TrimmableHls } from "../src/player-shared/low-latency.ts";
 import { DRIFT_SNAP_COOLDOWN_MS } from "../src/live/player/drift-snap.ts";
 import { STALL_DECAY_QUIET_MS } from "../src/live/player/stall-decay.ts";
 
@@ -13,18 +13,34 @@ function ranges(list: Array<[number, number]>): BufferedRanges {
     };
 }
 
-test("low latency needs the token bit and an origin-served channel", () => {
-    expect(lowLatencyAvailable(true, false)).toBe(true);
-    expect(lowLatencyAvailable(true, true)).toBe(false);
-    expect(lowLatencyAvailable(false, false)).toBe(false);
-    expect(lowLatencyAvailable(false, true)).toBe(false);
+test("an entitled viewer asks for low latency from an origin and from an edge, except native on an edge", () => {
+    expect(lowLatencyRequested(true, false, false)).toBe(true);
+    expect(lowLatencyRequested(true, false, true)).toBe(true);
+    expect(lowLatencyRequested(true, true, false)).toBe(true);
+    expect(lowLatencyRequested(true, true, true)).toBe(false);
+    expect(lowLatencyRequested(false, false, false)).toBe(false);
+    expect(lowLatencyRequested(false, true, false)).toBe(false);
 });
 
-test("embed takes low latency from the captcha token", () => {
-    expect(lowLatencyForToken("100.nonce.1.sig", false)).toBe(true);
-    expect(lowLatencyForToken("100.nonce.1.sig", true)).toBe(false);
-    expect(lowLatencyForToken("100.nonce.0.sig", false)).toBe(false);
-    expect(lowLatencyForToken(null, false)).toBe(false);
+test("embed takes the low latency request from the captcha token", () => {
+    expect(lowLatencyForToken("100.nonce.1.sig", false, false)).toBe(true);
+    expect(lowLatencyForToken("100.nonce.1.sig", true, false)).toBe(true);
+    expect(lowLatencyForToken("100.nonce.1.sig", true, true)).toBe(false);
+    expect(lowLatencyForToken("100.nonce.1.sig", false, true)).toBe(true);
+    expect(lowLatencyForToken("100.nonce.0.sig", false, false)).toBe(false);
+    expect(lowLatencyForToken(null, true, false)).toBe(false);
+});
+
+test("an origin viewer who asked keeps low latency whatever the master says, an edge viewer needs the offer", () => {
+    const offered = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nhttps://fra-edge-hls.itzon.tv/hls/a/source/live.m3u8?ll=1&v=1\n";
+    const plain = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nhttps://fra-edge-hls.itzon.tv/hls/a/source/live.m3u8?v=1\n";
+    expect(lowLatencyChosen(true, false, "")).toBe(true);
+    expect(lowLatencyChosen(true, false, plain)).toBe(true);
+    expect(lowLatencyChosen(true, true, offered)).toBe(true);
+    expect(lowLatencyChosen(true, true, plain)).toBe(false);
+    expect(lowLatencyChosen(true, true, "")).toBe(false);
+    expect(lowLatencyChosen(false, true, offered)).toBe(false);
+    expect(lowLatencyChosen(false, false, offered)).toBe(false);
 });
 
 test("master mode follows the low latency choice", () => {
@@ -99,4 +115,35 @@ test("trim does not snap into an unbuffered position", () => {
     const trim = newLowLatencyTrim(0);
     trimLowLatency(hls, media, trim, DRIFT_SNAP_COOLDOWN_MS + 1);
     expect(media.currentTime).toBe(91);
+});
+
+test("trim leaves an edge player alone while the edge serves its plain playlist on the parts url", () => {
+    const hls = fakeHls(1.5, 3, 97, { targetduration: 1, partHoldBack: 0, holdBack: 0 });
+    const media = { buffered: ranges([[90, 101]]), currentTime: 99.5 };
+    const trim = newLowLatencyTrim(0);
+    const now = DRIFT_SNAP_COOLDOWN_MS + STALL_DECAY_QUIET_MS;
+    expect(trimLowLatency(hls, media, trim, now)).toBe(false);
+    expect(media.currentTime).toBe(99.5);
+    expect(hls.targetLatency).toBe(3);
+    expect(trim).toEqual({ lastDriftSnapAt: 0, lastTargetChangeAt: 0 });
+});
+
+test("trim never lowers the target toward a plain playlist that has no hold-back", () => {
+    const hls = fakeHls(4, 4, 100, { targetduration: 1, partHoldBack: 0, holdBack: 0 });
+    const media = { buffered: ranges([[90, 101]]), currentTime: 96 };
+    const trim = newLowLatencyTrim(0);
+    trimLowLatency(hls, media, trim, STALL_DECAY_QUIET_MS * 3);
+    expect(hls.targetLatency).toBe(4);
+});
+
+test("trim snaps forward once when the edge's parts return and the new live edge is buffered", () => {
+    const hls = fakeHls(8, 3, 105, { targetduration: 1, partHoldBack: 3, holdBack: 3 });
+    const media = { buffered: ranges([[90, 106]]), currentTime: 97 };
+    const trim = newLowLatencyTrim(0);
+    const now = DRIFT_SNAP_COOLDOWN_MS + 1;
+    expect(trimLowLatency(hls, media, trim, now)).toBe(true);
+    expect(media.currentTime).toBe(105);
+    media.currentTime = 97;
+    expect(trimLowLatency(hls, media, trim, now + 1000)).toBe(false);
+    expect(media.currentTime).toBe(97);
 });

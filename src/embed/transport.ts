@@ -13,7 +13,7 @@ import { abrEstimateFor } from "../live/player/far-tier.ts";
 import { attachVideoFailureListeners } from "./health.ts";
 import { browserResourceTimingEnv, needsRttFetch, primedMasterLoader, RESOURCE_TIMING_WAIT_MS, rttFromTiming, watchResourceTiming, type PrimedMaster } from "../live/player/master-probe.ts";
 import { bufferedAheadOf, startupHoldOver } from "../live/player/startup-hold.ts";
-import { LL_STARTUP_RUNWAY_S, LL_TRIM_TICK_MS, lowLatencyForToken, lowLatencyHlsConfig, masterMode, newLowLatencyTrim, trimLowLatency } from "../player-shared/low-latency.ts";
+import { LL_STARTUP_RUNWAY_S, LL_TRIM_TICK_MS, lowLatencyChosen, lowLatencyForToken, lowLatencyHlsConfig, masterMode, newLowLatencyTrim, trimLowLatency } from "../player-shared/low-latency.ts";
 
 function sendHLSBeat(g: number): void {
     void Promise.all([captchaQuery(), ensureViewerId(ctx.mediaBase, ctx.username)]).then(([tq, vid]) => {
@@ -165,8 +165,9 @@ export function startHLSTransport(g: number): void {
 
     void getCaptchaToken().then(async (token) => {
         if (!isCurrent(g)) return;
-        const lowLatency = lowLatencyForToken(token || null, ctx.edgeServed);
-        const src = await masterUrl(lowLatency);
+        const edgeServed = ctx.edgeServed;
+        const requested = lowLatencyForToken(token || null, edgeServed, ctx.transportKind === "hls-native");
+        const src = await masterUrl(requested);
         if (!isCurrent(g)) return;
         if (ctx.transportKind === "hls-native") {
             startNativeHLS(g, src);
@@ -183,7 +184,7 @@ export function startHLSTransport(g: number): void {
             probeTiming.stop();
             return;
         }
-        if (lowLatency) {
+        if (lowLatencyChosen(requested, edgeServed, primed?.text ?? "")) {
             probeTiming.stop();
             startLowLatencyPlayer(g, src, primed);
             return;

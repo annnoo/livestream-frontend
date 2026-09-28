@@ -14,11 +14,13 @@ import { closeQualityUpsell, enterQualityLockedTerminal } from "../quality-upsel
 import { attachVideoFailureListeners, setStallGraceMs, stallDriftSnap } from "./health.ts";
 import { renderQualityMenu } from "../quality-menu.ts";
 import { parseLockedVariants, streamQualityText } from "../../quality.ts";
-import { clampToAdvertisedWindow, farWindowFor, isPhoneUA, latencyTierFor, latencyWindowFor, type LatencyWindow } from "./latency-window.ts";
-import { abrEstimateFor, stallGraceMsFor, startupRunwayFor } from "./far-tier.ts";
+import { isPhoneUA, type LatencyWindow } from "./latency-window.ts";
+import { lowLatencyStallGraceMs } from "./far-tier.ts";
+import { plainHlsTuning, plainLevelWindow, plainPlayerSetup } from "./plain-setup.ts";
+import { edgeLowLatencyReprobeMs, edgeLowLatencyUpgrade, edgeReprobeDue, partsTransition, watchesEdgeLowLatencyOffer, type ReprobeView } from "./edge-low-latency.ts";
 import { bufferedAheadOf, STARTUP_RUNWAY_S, startupHoldOver } from "./startup-hold.ts";
 import { updateSeekBar } from "../seekbar.ts";
-import { LL_STARTUP_RUNWAY_S, lowLatencyAvailable as lowLatencyAvailableFor, lowLatencyHlsConfig, masterMode, newLowLatencyTrim, trimLowLatency } from "../../player-shared/low-latency.ts";
+import { LL_STARTUP_RUNWAY_S, lowLatencyChosen, lowLatencyHlsConfig, lowLatencyRequested, masterMode, newLowLatencyTrim, trimLowLatency } from "../../player-shared/low-latency.ts";
 import { browserResourceTimingEnv, FAILED_PROBE, needsRttFetch, primedMasterLoader, probeOutcome, RESOURCE_TIMING_WAIT_MS, rttFromTiming, startPathFor, watchResourceTiming, type PrimedMaster } from "./master-probe.ts";
 
 export interface HlsLevelEntry {
@@ -135,7 +137,7 @@ function withCaptchaHint<T>(g: number, p: Promise<T>): Promise<T> {
 }
 
 export function lowLatencyAvailable(): boolean {
-    return lowLatencyAvailableFor(ctx.lowLatencyEntitled, ctx.edgeServed);
+    return lowLatencyRequested(ctx.lowLatencyEntitled, ctx.edgeServed, ctx.transportKind === "hls-native");
 }
 
 export function lowLatencyPreferred(): boolean {
@@ -146,18 +148,71 @@ export function lowLatencyWanted(): boolean {
     return lowLatencyAvailable() && lowLatencyPreferred();
 }
 
-async function buildMasterUrl(): Promise<string> {
+async function buildMasterUrl(lowLatency: boolean): Promise<string> {
     const tq = await captchaQuery();
-    return `${ctx.mediaBase}/hls/${encodeURIComponent(ctx.username)}/master.m3u8?${masterMode(lowLatencyWanted())}${tq}`;
+    return `${ctx.mediaBase}/hls/${encodeURIComponent(ctx.username)}/master.m3u8?${masterMode(lowLatency)}${tq}`;
 }
 
-function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | null): void {
-    console.log("live: hls low latency, parts playlist and media via the region's cdn zone");
-    setStallGraceMs(WAITING_STALL_MS);
+function reprobeView(): ReprobeView {
+    return { paused: video.paused, behindLive: ctx.behindLive, visible: document.visibilityState === "visible" };
+}
+
+function watchEdgeLowLatencyOffer(g: number, hls: Hls): void {
+    let attempt = 0;
+    let timer: number | null = null;
+    const live = () => isCurrent(g) && hlsInstance === hls;
+    const schedule = () => {
+        timer = window.setTimeout(probe, edgeLowLatencyReprobeMs(attempt));
+        attempt += 1;
+    };
+    const probe = () => {
+        timer = null;
+        if (!live()) return;
+        if (!edgeReprobeDue(reprobeView()) || !ctx.edgeServed || !lowLatencyWanted()) {
+            schedule();
+            return;
+        }
+        void buildMasterUrl(true)
+            .then((url) => fetch(url, { credentials: "include" }))
+            .then((res) => (res.ok ? res.text() : ""))
+            .catch(() => "")
+            .then((body) => {
+                if (!live()) return;
+                if (!edgeLowLatencyUpgrade(body, reprobeView())) {
+                    schedule();
+                    return;
+                }
+                console.log("live: edge now offers low latency, switching to the parts playlist");
+                beginTransport();
+            });
+    };
+    schedule();
+    track(() => {
+        if (timer !== null) window.clearTimeout(timer);
+        timer = null;
+    });
+}
+
+function watchEdgeParts(g: number, hls: Hls): void {
+    let hadParts: boolean | null = null;
+    hls.on(Hls.Events.LEVEL_LOADED, (_event, data) => {
+        if (!isCurrent(g) || hlsInstance !== hls) return;
+        const hasParts = (data.details.partList?.length ?? 0) > 0;
+        const change = partsTransition(hadParts, hasParts);
+        hadParts = hasParts;
+        if (change === "withdrawn") console.log("live: edge withdrew low latency, playing its plain playlist on the same url");
+        if (change === "restored") console.log("live: edge restored low latency parts");
+    });
+}
+
+function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | null, edgeServed: boolean): void {
+    console.log(edgeServed ? "live: hls low latency, parts playlist and media via the edge's zone" : "live: hls low latency, parts playlist and media via the region's cdn zone");
+    setStallGraceMs(lowLatencyStallGraceMs(edgeServed, WAITING_STALL_MS));
     const hls = new Hls(lowLatencyHlsConfig(Hls.DefaultConfig.loader, primed, PRUNE_KEEP_S, (url) => needsCredentials(url, ctx.mediaBase, location.origin)));
     hlsInstance = hls;
     hlsLevelEntries = [];
     watchMasterLadder(g, hls);
+    if (edgeServed) watchEdgeParts(g, hls);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (!isCurrent(g) || hlsInstance !== hls) return;
         hlsLevelEntries = hls.levels.map((level, index) => ({
@@ -258,40 +313,28 @@ function startNativeHLS(g: number, src: string): void {
 }
 
 const HLS_DVR_TICK_MS = 500;
-const DEFAULT_LIVE_WINDOW: LatencyWindow = { sync: 5, max: 12 };
-const TIGHT_LIVE_WINDOW: LatencyWindow = { sync: 2.5, max: 8 };
-const FAR_LIVE_WINDOW: LatencyWindow = { sync: 10, max: 24 };
 
 function isPhone(): boolean {
     const uaData = (navigator as { userAgentData?: { mobile?: boolean } }).userAgentData;
     return isPhoneUA(navigator.userAgent, typeof uaData?.mobile === "boolean" ? uaData.mobile : null);
 }
 
-function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: number | null, primed: PrimedMaster | null): void {
+function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: number | null, primed: PrimedMaster | null, watchEdgeOffer: boolean): void {
     const phone = isPhone();
     const edgeServed = ctx.edgeServed;
-    const tier = edgeServed ? "far" : latencyTierFor(rttMs, originLL, phone);
+    const setup = plainPlayerSetup(edgeServed, rttMs, originLL, phone, WAITING_STALL_MS, STARTUP_RUNWAY_S);
+    const tier = setup.tier;
     console.log("live: hls latency tier", tier, rttMs === null ? "unmeasured" : `${Math.round(rttMs)}ms`, phone ? "phone" : "desktop", edgeServed ? "edge" : "origin");
-    setStallGraceMs(stallGraceMsFor(tier, WAITING_STALL_MS));
-    const startupRunwayS = startupRunwayFor(tier, STARTUP_RUNWAY_S);
-    let normalLiveWindow: LatencyWindow = edgeServed
-        ? DEFAULT_LIVE_WINDOW
-        : tier === "near"
-            ? TIGHT_LIVE_WINDOW
-            : tier === "far" ? FAR_LIVE_WINDOW : DEFAULT_LIVE_WINDOW;
+    setStallGraceMs(setup.graceMs);
+    const startupRunwayS = setup.startupRunwayS;
+    let normalLiveWindow: LatencyWindow = setup.window;
     let dvrHoldActive = false;
     const prefetch = segmentPrefetchLoader(Hls.DefaultConfig.loader);
     track(prefetch.clear);
     const hls = new Hls({
         loader: prefetch.loader,
         ...(primed ? { pLoader: primedMasterLoader(prefetch.loader, primed) } : {}),
-        lowLatencyMode: false,
-        abrEwmaDefaultEstimate: abrEstimateFor(tier),
-        backBufferLength: PRUNE_KEEP_S,
-        liveSyncDuration: normalLiveWindow.sync,
-        liveMaxLatencyDuration: normalLiveWindow.max,
-        maxLiveSyncPlaybackRate: 1.05,
-        enableWorker: true,
+        ...plainHlsTuning(setup, PRUNE_KEEP_S),
         xhrSetup: (xhr, url) => {
             xhr.withCredentials = needsCredentials(url, ctx.mediaBase, location.origin);
         },
@@ -322,17 +365,7 @@ function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: numb
             console.log("live: playlist is finalized, playing out remaining media");
             return;
         }
-        const base = edgeServed
-            ? DEFAULT_LIVE_WINDOW
-            : tier === "far"
-                ? farWindowFor(data.details.targetduration) ?? FAR_LIVE_WINDOW
-                : tier === "near" && data.details.url.startsWith(ctx.mediaBase) ? TIGHT_LIVE_WINDOW : DEFAULT_LIVE_WINDOW;
-        const widened = latencyWindowFor(data.details.targetduration);
-        const target = clampToAdvertisedWindow(
-            widened && widened.sync > base.sync ? widened : base,
-            data.details.totalduration,
-            data.details.targetduration,
-        );
+        const target = plainLevelWindow(edgeServed, tier, data.details, ctx.mediaBase);
         if (normalLiveWindow.sync !== target.sync || normalLiveWindow.max !== target.max) {
             normalLiveWindow = target;
             if (!dvrHoldActive) applyLiveWindow(target);
@@ -347,6 +380,7 @@ function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: numb
     });
     hls.on(Hls.Events.MEDIA_ATTACHED, loadSourceOnce(hls, src, () => isCurrent(g) && hlsInstance === hls));
     hls.attachMedia(video);
+    if (watchEdgeOffer) watchEdgeLowLatencyOffer(g, hls);
     const holdStarted = Date.now();
     const holdTimer = window.setInterval(() => {
         if (!isCurrent(g) || hlsInstance !== hls) {
@@ -384,16 +418,20 @@ export function startHLSTransport(g: number): void {
     closeQualityUpsell();
     wireVideoLifecycle(g);
     if (ctx.state !== "offline") setState("buffering");
-    void withCaptchaHint(g, buildMasterUrl()).then(async (src) => {
+    const requested = lowLatencyWanted();
+    const edgeServed = ctx.edgeServed;
+    void withCaptchaHint(g, buildMasterUrl(requested)).then(async (src) => {
         if (!isCurrent(g)) return;
         let probe = FAILED_PROBE;
         let primed: PrimedMaster | null = null;
+        let masterBody = "";
         const probeTiming = watchResourceTiming(performance.now(), browserResourceTimingEnv(src));
         try {
             const res = await fetch(src, { credentials: "include" });
             const body = await res.text().catch(() => "");
             probe = probeOutcome(res.status, body);
             if (probe.playable) {
+                masterBody = body;
                 ctx.lockedQualities = parseLockedVariants(body);
                 if (body) primed = { url: res.url || src, text: body };
             }
@@ -402,7 +440,8 @@ export function startHLSTransport(g: number): void {
             probeTiming.stop();
             return;
         }
-        const path = startPathFor(probe, ctx.transportKind === "hls-native", lowLatencyWanted());
+        const chosen = lowLatencyChosen(requested, edgeServed, masterBody);
+        const path = startPathFor(probe, ctx.transportKind === "hls-native", chosen);
         if (path !== "standard") probeTiming.stop();
         if (path === "quality-locked") {
             enterQualityLockedTerminal();
@@ -417,7 +456,7 @@ export function startHLSTransport(g: number): void {
             return;
         }
         if (path === "low-latency") {
-            startLowLatencyPlayer(g, src, primed);
+            startLowLatencyPlayer(g, src, primed, edgeServed);
             return;
         }
         let rttMs = primed ? rttFromTiming(await probeTiming.settle(RESOURCE_TIMING_WAIT_MS)) : null;
@@ -431,6 +470,6 @@ export function startHLSTransport(g: number): void {
             } catch {}
             if (!isCurrent(g)) return;
         }
-        startHlsJsPlayer(g, src, probe.originLL, rttMs, primed);
+        startHlsJsPlayer(g, src, probe.originLL, rttMs, primed, watchesEdgeLowLatencyOffer(requested, edgeServed, chosen));
     });
 }
