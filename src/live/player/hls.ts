@@ -6,7 +6,7 @@ import { HLS_BEACON_INTERVAL_MS, HLS_QUALITY_STORAGE_KEY, LOW_LATENCY_STORAGE_KE
 import { readLocalStorage, writeLocalStorage } from "../../storage.ts";
 import { ensureViewerId } from "../../player-shared/viewer-id.ts";
 import { needsCredentials } from "../../player-shared/needs-credentials.ts";
-import { beatUrl, beatVariants, ladderGrew } from "../../player-shared/hls-beat.ts";
+import { beatUrl, beatVariants, ladderGrew, newLadderWatch } from "../../player-shared/hls-beat.ts";
 import { loadSourceOnce } from "../../player-shared/source-once.ts";
 import { captchaQuery } from "../../captcha.ts";
 import { beginTransport, fullTeardown, goOffline, resetRetryBackoff, restartAfterFailure, setPoster, setState, suspendForPause } from "./lifecycle.ts";
@@ -32,10 +32,11 @@ function sendHLSBeat(g: number): void {
         const res = await fetch(beatUrl(ctx.mediaBase, ctx.username, vid, tq), { method: "POST", credentials: "include" });
         const variants = beatVariants(res.status, await res.text());
         if (!isCurrent(g)) return;
-        const hls = hlsInstance;
-        if (hls && ladderGrew(variants, hls.levels.length, video.paused)) beginTransport();
+        if (hlsInstance && ladderGrew(ladderWatch, variants, video.paused)) beginTransport();
     }).catch(() => {});
 }
+
+const ladderWatch = newLadderWatch();
 
 let hlsBeaconTimer: number | null = null;
 
@@ -70,6 +71,7 @@ export function destroyHls(): void {
         hlsInstance = null;
     }
     hlsLevelEntries = [];
+    ladderWatch.master = null;
 }
 
 export function hlsLevels(): HlsLevelEntry[] {
@@ -161,6 +163,7 @@ function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | nu
     const hls = new Hls(lowLatencyHlsConfig(Hls.DefaultConfig.loader, primed, PRUNE_KEEP_S, (url) => needsCredentials(url, ctx.mediaBase, location.origin)));
     hlsInstance = hls;
     hlsLevelEntries = [];
+    watchMasterLadder(g, hls);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (!isCurrent(g) || hlsInstance !== hls) return;
         hlsLevelEntries = hls.levels.map((level, index) => ({
@@ -211,6 +214,13 @@ function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | nu
         updateSeekBar();
     }, HLS_DVR_TICK_MS);
     track(() => window.clearInterval(dvrTimer));
+}
+
+function watchMasterLadder(g: number, hls: Hls): void {
+    hls.on(Hls.Events.MANIFEST_LOADED, (_event, data) => {
+        if (!isCurrent(g) || hlsInstance !== hls) return;
+        ladderWatch.master = data.levels.length;
+    });
 }
 
 function applyPreferredLevel(hls: Hls): void {
@@ -298,6 +308,7 @@ function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: numb
         hls.config.liveSyncDuration = target.sync;
         hls.config.liveMaxLatencyDuration = target.max;
     };
+    watchMasterLadder(g, hls);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (!isCurrent(g) || hlsInstance !== hls) return;
         hlsLevelEntries = hls.levels.map((level, index) => ({

@@ -14,7 +14,22 @@ export function beatVariants(status: number, body: string): number | null {
     }
 }
 
-export function ladderGrew(variants: number | null, levels: number, paused: boolean): boolean {
-    if (variants === null || paused || levels <= 0) return false;
-    return variants > levels;
+export interface LadderWatch {
+    master: number | null;
+    restartedFor: number | null;
+}
+
+export function newLadderWatch(): LadderWatch {
+    return { master: null, restartedFor: null };
+}
+
+export function ladderGrew(watch: LadderWatch, variants: number | null, paused: boolean): boolean {
+    if (variants === null || watch.master === null || watch.master <= 0) return false;
+    if (variants <= watch.master) {
+        watch.restartedFor = null;
+        return false;
+    }
+    if (paused || (watch.restartedFor !== null && variants <= watch.restartedFor)) return false;
+    watch.restartedFor = variants;
+    return true;
 }
