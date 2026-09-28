@@ -6,6 +6,7 @@ import { HLS_BEACON_INTERVAL_MS, HLS_QUALITY_STORAGE_KEY, LOW_LATENCY_STORAGE_KE
 import { readLocalStorage, writeLocalStorage } from "../../storage.ts";
 import { ensureViewerId } from "../../player-shared/viewer-id.ts";
 import { needsCredentials } from "../../player-shared/needs-credentials.ts";
+import { beatUrl, beatVariants, ladderGrew } from "../../player-shared/hls-beat.ts";
 import { captchaQuery } from "../../captcha.ts";
 import { beginTransport, fullTeardown, goOffline, resetRetryBackoff, restartAfterFailure, setPoster, setState, suspendForPause } from "./lifecycle.ts";
 import { closeQualityUpsell, enterQualityLockedTerminal } from "../quality-upsell.ts";
@@ -25,11 +26,14 @@ export interface HlsLevelEntry {
 }
 
 function sendHLSBeat(g: number): void {
-    void Promise.all([captchaQuery(), ensureViewerId(ctx.mediaBase, ctx.username)]).then(([tq, vid]) => {
+    void Promise.all([captchaQuery(), ensureViewerId(ctx.mediaBase, ctx.username)]).then(async ([tq, vid]) => {
         if (!isCurrent(g)) return;
-        const url = `${ctx.mediaBase}/hls/${encodeURIComponent(ctx.username)}/beat?id=${encodeURIComponent(vid)}${tq}`;
-        fetch(url, { method: "POST", credentials: "include" }).catch(() => {});
-    });
+        const res = await fetch(beatUrl(ctx.mediaBase, ctx.username, vid, tq), { method: "POST", credentials: "include" });
+        const variants = beatVariants(res.status, await res.text());
+        if (!isCurrent(g)) return;
+        const hls = hlsInstance;
+        if (hls && ladderGrew(variants, hls.levels.length, video.paused)) beginTransport();
+    }).catch(() => {});
 }
 
 let hlsBeaconTimer: number | null = null;
@@ -199,7 +203,6 @@ function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | nu
     }, 200);
     track(() => window.clearInterval(holdTimer));
     startHLSBeacon(g);
-    startLadderWatch(g, src);
     const dvrTimer = window.setInterval(() => {
         if (!isCurrent(g) || hlsInstance !== hls) {
             window.clearInterval(dvrTimer);
@@ -360,7 +363,6 @@ function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: numb
     }, 200);
     track(() => window.clearInterval(holdTimer));
     startHLSBeacon(g);
-    startLadderWatch(g, src);
     const dvrTimer = window.setInterval(() => {
         if (!isCurrent(g) || hlsInstance !== hls) {
             window.clearInterval(dvrTimer);
@@ -375,25 +377,6 @@ function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: numb
         updateSeekBar();
     }, HLS_DVR_TICK_MS);
     track(() => window.clearInterval(dvrTimer));
-}
-
-const LADDER_WATCH_MS = 30000;
-
-function startLadderWatch(g: number, src: string): void {
-    const timer = window.setInterval(() => {
-        if (!isCurrent(g)) return;
-        if (video.paused) return;
-        const hls = hlsInstance;
-        if (!hls) return;
-        void fetch(src, { credentials: "include" }).then(async (res) => {
-            if (!res.ok || !isCurrent(g) || hlsInstance !== hls) return;
-            const text = await res.text();
-            if (!isCurrent(g) || hlsInstance !== hls) return;
-            const variants = text.split("#EXT-X-STREAM-INF").length - 1;
-            if (variants > hls.levels.length) beginTransport();
-        }).catch(() => {});
-    }, LADDER_WATCH_MS);
-    track(() => window.clearInterval(timer));
 }
 
 export function startHLSTransport(g: number): void {

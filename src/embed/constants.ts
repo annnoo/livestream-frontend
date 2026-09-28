@@ -1,7 +1,7 @@
 export const RETRY_MIN_MS = 1000;
 export const RETRY_MAX_MS = 15000;
 export const RETRY_MULT = 2;
-export const HLS_BEACON_INTERVAL_MS = 10000;
+export const HLS_BEACON_INTERVAL_MS = 30000;
 export const HEALTH_CHECK_INTERVAL_MS = 5000;
 export const HEALTH_STALE_MS = 15000;
 export const HEALTH_STUCK_MS = 20000;

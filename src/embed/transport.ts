@@ -5,6 +5,7 @@ import { HLS_BEACON_INTERVAL_MS } from "./constants.ts";
 import { captchaQuery, getCaptchaToken } from "../captcha.ts";
 import { ensureViewerId } from "../player-shared/viewer-id.ts";
 import { needsCredentials } from "../player-shared/needs-credentials.ts";
+import { beatUrl } from "../player-shared/hls-beat.ts";
 import { goOffline, resetRetryBackoff, restartAfterFailure, setPlaying } from "./lifecycle.ts";
 import { latencyTierFor } from "../live/player/latency-window.ts";
 import { abrEstimateFor } from "../live/player/far-tier.ts";
@@ -16,8 +17,7 @@ import { LL_STARTUP_RUNWAY_S, LL_TRIM_TICK_MS, lowLatencyForToken, lowLatencyHls
 function sendHLSBeat(g: number): void {
     void Promise.all([captchaQuery(), ensureViewerId(ctx.mediaBase, ctx.username)]).then(([tq, vid]) => {
         if (!isCurrent(g)) return;
-        const url = `${ctx.mediaBase}/hls/${encodeURIComponent(ctx.username)}/beat?id=${encodeURIComponent(vid)}${tq}`;
-        fetch(url, { method: "POST", credentials: "include" }).catch(() => {});
+        fetch(beatUrl(ctx.mediaBase, ctx.username, vid, tq), { method: "POST", credentials: "include" }).catch(() => {});
     });
 }
 
