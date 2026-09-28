@@ -3,9 +3,19 @@ import { video } from "../dom.ts";
 import { ctx, isCurrent, track } from "./context.ts";
 import { HEALTH_CHECK_INTERVAL_MS, HEALTH_STALE_MS, HEALTH_STUCK_MS, WAITING_STALL_MS } from "../constants.ts";
 import { beginTransport, clearRetryTimer, restartAfterFailure } from "./lifecycle.ts";
+import { hlsLiveSyncPosition, recoverHlsMedia, resumeHlsLoad } from "./hls.ts";
+import { mediaErrorStep, nextStallCheckMs, nudgeSeekTarget, stallLadder, stallRecovered, stallStepDue, stallTeardownMs, type StallRung, type StallStep } from "./stall-escalation.ts";
+
+interface StallEpisode {
+    startedAt: number;
+    progressAt: number;
+    taken: number;
+}
 
 let waitingTimer: number | null = null;
 let stallGraceMs = WAITING_STALL_MS;
+let stallEpisode: StallEpisode | null = null;
+let lastMediaRecoveryAt = Number.NEGATIVE_INFINITY;
 
 export function setStallGraceMs(ms: number): void {
     stallGraceMs = ms;
@@ -20,6 +30,15 @@ export function clearWaitingTimer(): void {
         window.clearTimeout(waitingTimer);
         waitingTimer = null;
     }
+    stallEpisode = null;
+}
+
+function hlsJsActive(): boolean {
+    return ctx.transportKind === "hls-js";
+}
+
+function currentStallLadder(): StallRung[] {
+    return stallLadder(stallGraceMs, hlsJsActive());
 }
 
 export function healthRestart(reason: string): void {
@@ -34,7 +53,8 @@ export function healthCheck(): void {
     const now = Date.now();
     if (ctx.state === "playing") {
         if (video.paused) return;
-        const progressStale = !video.paused && now - ctx.lastProgressAt > recoveryDeadlineMs(HEALTH_STALE_MS, stallGraceMs);
+        const staleDeadline = recoveryDeadlineMs(HEALTH_STALE_MS, stallTeardownMs(stallGraceMs, hlsJsActive()));
+        const progressStale = !video.paused && now - ctx.lastProgressAt > staleDeadline;
         if (progressStale) healthRestart("stale-playing");
         return;
     }
@@ -60,33 +80,91 @@ export function stopHealthTimer(): void {
     healthTimer = null;
 }
 
+function bufferedRanges(): Array<{ start: number; end: number }> {
+    const ranges: Array<{ start: number; end: number }> = [];
+    for (let i = 0; i < video.buffered.length; i++) {
+        ranges.push({ start: video.buffered.start(i), end: video.buffered.end(i) });
+    }
+    return ranges;
+}
+
+function recoverMedia(): boolean {
+    const wasPaused = video.paused;
+    if (!recoverHlsMedia()) return false;
+    lastMediaRecoveryAt = Date.now();
+    if (!wasPaused) void video.play().catch(() => {});
+    return true;
+}
+
+function applyStallStep(g: number, step: StallStep): void {
+    if (step === "reload") {
+        console.log("live: stalled, restarting hls loading");
+        ctx.pauseSuspended = false;
+        resumeHlsLoad();
+        const target = nudgeSeekTarget(video.currentTime, hlsLiveSyncPosition(), bufferedRanges(), ctx.behindLive);
+        if (target !== null) video.currentTime = target;
+        return;
+    }
+    if (step === "recover-media" && recoverMedia()) {
+        console.warn("live: still stalled, recovering media");
+        return;
+    }
+    console.warn("live: stall did not recover, restarting");
+    restartAfterFailure(g);
+}
+
+function scheduleStallCheck(g: number): void {
+    const episode = stallEpisode;
+    if (!episode || waitingTimer !== null) return;
+    const delay = nextStallCheckMs(currentStallLadder(), Date.now() - episode.startedAt, episode.taken);
+    if (delay === null) return;
+    waitingTimer = window.setTimeout(() => {
+        waitingTimer = null;
+        runStallCheck(g);
+    }, delay);
+}
+
+function runStallCheck(g: number): void {
+    if (!isCurrent(g)) return;
+    const episode = stallEpisode;
+    if (!episode) return;
+    if (stallRecovered(Date.now() - ctx.lastProgressAt, video.paused)) {
+        stallEpisode = null;
+        return;
+    }
+    const due = stallStepDue(currentStallLadder(), Date.now() - episode.startedAt, episode.taken);
+    if (due) {
+        episode.taken = due.taken;
+        applyStallStep(g, due.step);
+    }
+    if (isCurrent(g) && stallEpisode === episode) scheduleStallCheck(g);
+}
+
 export function attachVideoFailureListeners(g: number): void {
     const onError = () => {
         if (!isCurrent(g)) return;
+        if (mediaErrorStep(hlsJsActive(), Date.now() - lastMediaRecoveryAt) === "recover-media" && recoverMedia()) {
+            console.warn("live: video error, recovering media");
+            return;
+        }
         console.warn("live: video error, restarting");
         restartAfterFailure(g);
     };
     const onWaiting = () => {
         if (!isCurrent(g)) return;
-        if (waitingTimer !== null) return;
-        waitingTimer = window.setTimeout(() => {
-            waitingTimer = null;
-            if (!isCurrent(g)) return;
-            if (video.readyState < 3) restartAfterFailure(g);
-        }, stallGraceMs);
+        if (!stallEpisode || (stallEpisode.taken === 0 && stallEpisode.progressAt !== ctx.lastProgressAt)) {
+            clearWaitingTimer();
+            stallEpisode = { startedAt: Date.now(), progressAt: ctx.lastProgressAt, taken: 0 };
+        }
+        scheduleStallCheck(g);
     };
-    const onRecovered = () => clearWaitingTimer();
 
     video.addEventListener("error", onError);
     video.addEventListener("stalled", onWaiting);
     video.addEventListener("waiting", onWaiting);
-    video.addEventListener("playing", onRecovered);
-    video.addEventListener("canplay", onRecovered);
 
     track(() => video.removeEventListener("error", onError));
     track(() => video.removeEventListener("stalled", onWaiting));
     track(() => video.removeEventListener("waiting", onWaiting));
-    track(() => video.removeEventListener("playing", onRecovered));
-    track(() => video.removeEventListener("canplay", onRecovered));
     track(clearWaitingTimer);
 }

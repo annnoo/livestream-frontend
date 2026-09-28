@@ -110,6 +110,16 @@ export function resumeHlsLoad(): void {
     } catch {}
 }
 
+export function recoverHlsMedia(): boolean {
+    if (!hlsInstance) return false;
+    try {
+        hlsInstance.recoverMediaError();
+    } catch {
+        return false;
+    }
+    return true;
+}
+
 function withCaptchaHint<T>(g: number, p: Promise<T>): Promise<T> {
     const t = window.setTimeout(() => {
         if (isCurrent(g) && !ctx.terminal) setPoster("Checking access", false, true);
