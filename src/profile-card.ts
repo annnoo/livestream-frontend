@@ -1,3 +1,4 @@
+import { smallAvatarUrl } from "./avatar-url.ts";
 import { hashColor } from "./chat/text.ts";
 import { PLATFORM_LABELS, PLATFORM_PATHS } from "./platform-icons.ts";
 import { normalizePanels, type ProfilePanel } from "./live/about/panels.ts";
@@ -147,7 +148,7 @@ function parseProfile(data: Record<string, unknown> | null): Profile | null {
 }
 
 function avatarUrl(profile: Profile): string {
-    return `/api/live/profile/${encodeURIComponent(profile.username)}/avatar?v=${profile.avatarVersion}`;
+    return smallAvatarUrl(profile.username, profile.avatarVersion);
 }
 
 export function offlineArtUrl(profile: Profile): string | null {

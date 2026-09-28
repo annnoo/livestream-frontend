@@ -1,4 +1,5 @@
 import { API_BASE } from "./api.ts";
+import { smallAvatarUrl } from "./avatar-url.ts";
 import { ICON_CHEVRON_LEFT, ICON_CHEVRON_RIGHT } from "./live/icons.ts";
 import { railCardModel } from "./rail-card.ts";
 import { readLocalStorage, writeLocalStorage } from "./storage.ts";
@@ -35,10 +36,13 @@ interface ChannelRailStream {
     title: string;
     category: string | null;
     viewers: number;
+    hasAvatar?: boolean;
+    avatarVersion?: number;
 }
 
 interface RailItem {
     root: HTMLAnchorElement;
+    avatar: HTMLElement;
     name: HTMLElement;
     category: HTMLElement;
     viewers: HTMLElement;
@@ -57,7 +61,7 @@ function normalizeStream(value: unknown): ChannelRailStream | null {
     if (!value || typeof value !== "object") return null;
     const stream = value as Partial<ChannelRailStream>;
     if (typeof stream.username !== "string" || stream.username.trim().length === 0) return null;
-    return {
+    const normalized: ChannelRailStream = {
         username: stream.username.trim(),
         title: typeof stream.title === "string" ? stream.title : "",
         category: typeof stream.category === "string" ? stream.category : null,
@@ -65,6 +69,39 @@ function normalizeStream(value: unknown): ChannelRailStream | null {
             ? Math.max(0, Math.floor(stream.viewers))
             : 0,
     };
+    if (typeof stream.hasAvatar === "boolean") normalized.hasAvatar = stream.hasAvatar;
+    if (typeof stream.avatarVersion === "number" && Number.isFinite(stream.avatarVersion)) {
+        normalized.avatarVersion = stream.avatarVersion;
+    }
+    return normalized;
+}
+
+export function railAvatarUrl(stream: { username: string; hasAvatar?: boolean; avatarVersion?: number }): string | null {
+    if (stream.hasAvatar === false) return null;
+    return smallAvatarUrl(stream.username.toLowerCase(), stream.avatarVersion);
+}
+
+export function syncRailAvatar(avatar: HTMLElement, url: string | null, known: boolean): void {
+    const current = avatar.querySelector("img");
+    if (current && !known) return;
+    if (url === null || avatar.dataset.avatarFailed === url) {
+        current?.remove();
+        return;
+    }
+    if (current && current.dataset.src === url) return;
+    const img = current ?? document.createElement("img");
+    if (!current) {
+        img.className = "live-channel-avatar-img";
+        img.alt = "";
+        img.loading = "lazy";
+        img.onerror = () => {
+            avatar.dataset.avatarFailed = img.dataset.src ?? "";
+            img.remove();
+        };
+        avatar.appendChild(img);
+    }
+    img.dataset.src = url;
+    img.src = url;
 }
 
 function byViewersThenName(a: ChannelRailStream, b: ChannelRailStream): number {
@@ -135,6 +172,7 @@ export function createChannelRail(options: ChannelRailOptions): ChannelRailHandl
         item.root.classList.toggle("active", active);
         if (active) item.root.setAttribute("aria-current", "page");
         else item.root.removeAttribute("aria-current");
+        syncRailAvatar(item.avatar, railAvatarUrl(stream), typeof stream.hasAvatar === "boolean");
         item.name.textContent = stream.username;
         item.category.textContent = offline ? "Offline" : category;
         item.viewers.textContent = offline ? "" : compactViewerFormatter.format(stream.viewers);
@@ -156,13 +194,6 @@ export function createChannelRail(options: ChannelRailOptions): ChannelRailHandl
         const avatar = document.createElement("span");
         avatar.className = "live-channel-avatar";
         avatar.textContent = stream.username.slice(0, 1);
-        const avatarImg = document.createElement("img");
-        avatarImg.className = "live-channel-avatar-img";
-        avatarImg.src = `/api/live/profile/${encodeURIComponent(normalizedUsername)}/avatar`;
-        avatarImg.alt = "";
-        avatarImg.loading = "lazy";
-        avatarImg.onerror = () => avatarImg.remove();
-        avatar.appendChild(avatarImg);
 
         const name = document.createElement("span");
         name.className = "live-channel-name";
@@ -183,7 +214,7 @@ export function createChannelRail(options: ChannelRailOptions): ChannelRailHandl
 
         link.append(avatar, copy);
 
-        const item: RailItem = { root: link, name, category: categoryEl, viewers: viewerCount, stream, offline };
+        const item: RailItem = { root: link, avatar, name, category: categoryEl, viewers: viewerCount, stream, offline };
         railItems.set(normalizedUsername, item);
         updateRailItem(item, stream, offline);
         return link;

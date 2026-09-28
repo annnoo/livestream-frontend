@@ -98,7 +98,7 @@ describe("buildAvatar", () => {
         const img = buildAvatar(profile()) as unknown as StubElement;
         expect(img.tagName).toBe("img");
         expect(img.className).toBe("profile-card-avatar");
-        expect(img.src).toBe("/api/live/profile/miruku/avatar?v=3");
+        expect(img.src).toBe("/api/live/profile/miruku/avatar?v=3&s=128");
         expect(img.loading).toBe("lazy");
     });
 

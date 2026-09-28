@@ -1,6 +1,7 @@
 import { subscriberBadgeAssetPath, subscriberBadgeTitle } from "./badges.ts";
 import { hasModRole, nickColor } from "./members.ts";
 import { inputEl } from "./dom.ts";
+import { smallAvatarUrl } from "../avatar-url.ts";
 import { loadProfile } from "../profile-card.ts";
 import { ctx, myNickLower } from "./context.ts";
 import { send } from "./connection.ts";
@@ -148,7 +149,7 @@ export function openUserCard(username: string, anchor: DOMRect): void {
         if (profile.hasAvatar) {
             const img = document.createElement("img");
             img.className = "live-user-card-avatar";
-            img.src = `/api/live/profile/${encodeURIComponent(profile.username)}/avatar?v=${profile.avatarVersion}`;
+            img.src = smallAvatarUrl(profile.username, profile.avatarVersion);
             img.alt = "";
             img.addEventListener("error", () => img.replaceWith(fallback));
             fallback.replaceWith(img);
