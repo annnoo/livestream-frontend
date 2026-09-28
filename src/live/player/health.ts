@@ -4,7 +4,7 @@ import { ctx, isCurrent, track } from "./context.ts";
 import { HEALTH_CHECK_INTERVAL_MS, HEALTH_STALE_MS, HEALTH_STUCK_MS, WAITING_STALL_MS } from "../constants.ts";
 import { beginTransport, clearRetryTimer, restartAfterFailure } from "./lifecycle.ts";
 import { hlsLiveSyncPosition, recoverHlsMedia, resumeHlsLoad } from "./hls.ts";
-import { mediaErrorStep, nextStallCheckMs, nudgeSeekTarget, stallCheck, stallEpisodeOnPlaying, stallEpisodeOnWaiting, stallLadder, stallTeardownMs, type StallEpisode, type StallRung, type StallStep } from "./stall-escalation.ts";
+import { mediaErrorStep, nextStallCheckMs, nudgeSeekTarget, recoveryLiveSeek, stallCheck, stallEpisodeOnPlaying, stallEpisodeOnWaiting, stallLadder, stallTeardownMs, type StallEpisode, type StallRung, type StallStep } from "./stall-escalation.ts";
 
 let waitingTimer: number | null = null;
 let stallGraceMs = WAITING_STALL_MS;
@@ -82,11 +82,46 @@ function bufferedRanges(): Array<{ start: number; end: number }> {
     return ranges;
 }
 
-function recoverMedia(): boolean {
+const RECOVERY_LIVE_SEEK_TICK_MS = 250;
+let liveSeekTimer: number | null = null;
+
+function clearLiveSeekTimer(): void {
+    if (liveSeekTimer === null) return;
+    window.clearInterval(liveSeekTimer);
+    liveSeekTimer = null;
+}
+
+function seekLiveAfterRecovery(g: number): void {
+    clearLiveSeekTimer();
+    const recoveredAt = Date.now();
+    liveSeekTimer = window.setInterval(() => {
+        if (!isCurrent(g)) {
+            clearLiveSeekTimer();
+            return;
+        }
+        const decision = recoveryLiveSeek({
+            currentTime: video.currentTime,
+            syncPosition: hlsLiveSyncPosition(),
+            ranges: bufferedRanges(),
+            behindLive: ctx.behindLive,
+            paused: video.paused,
+            sinceRecoveryMs: Date.now() - recoveredAt,
+        });
+        if (decision.kind === "wait") return;
+        clearLiveSeekTimer();
+        if (decision.kind === "seek") {
+            console.log("live: media recovered", (decision.to - video.currentTime).toFixed(1), "s behind, seeking to live");
+            video.currentTime = decision.to;
+        }
+    }, RECOVERY_LIVE_SEEK_TICK_MS);
+}
+
+function recoverMedia(g: number): boolean {
     const wasPaused = video.paused;
     if (!recoverHlsMedia()) return false;
     lastMediaRecoveryAt = Date.now();
     if (!wasPaused) void video.play().catch(() => {});
+    seekLiveAfterRecovery(g);
     return true;
 }
 
@@ -99,7 +134,7 @@ function applyStallStep(g: number, step: StallStep): void {
         if (target !== null) video.currentTime = target;
         return;
     }
-    if (step === "recover-media" && recoverMedia()) {
+    if (step === "recover-media" && recoverMedia(g)) {
         console.warn("live: still stalled, recovering media");
         return;
     }
@@ -138,7 +173,7 @@ function runStallCheck(g: number): void {
 export function attachVideoFailureListeners(g: number): void {
     const onError = () => {
         if (!isCurrent(g)) return;
-        if (mediaErrorStep(hlsJsActive(), Date.now() - lastMediaRecoveryAt) === "recover-media" && recoverMedia()) {
+        if (mediaErrorStep(hlsJsActive(), Date.now() - lastMediaRecoveryAt) === "recover-media" && recoverMedia(g)) {
             console.warn("live: video error, recovering media");
             return;
         }
@@ -169,4 +204,5 @@ export function attachVideoFailureListeners(g: number): void {
     track(() => video.removeEventListener("waiting", onWaiting));
     track(() => video.removeEventListener("playing", onPlaying));
     track(clearWaitingTimer);
+    track(clearLiveSeekTimer);
 }

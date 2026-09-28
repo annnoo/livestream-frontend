@@ -4,6 +4,9 @@ import {
     MEDIA_RECOVERY_COOLDOWN_MS,
     nextStallCheckMs,
     nudgeSeekTarget,
+    RECOVERY_LIVE_SEEK_MIN_BEHIND_S,
+    RECOVERY_LIVE_SEEK_WINDOW_MS,
+    recoveryLiveSeek,
     stallCheck,
     stallEpisodeOnPlaying,
     stallEpisodeOnWaiting,
@@ -197,4 +200,34 @@ test("a stall that cleared before any step starts a new episode on fresh progres
     const second = stallEpisodeOnWaiting(first, 3000, 2500);
     expect(second).not.toBe(first);
     expect(second.startedAt).toBe(3000);
+});
+
+const recovered = { currentTime: 100, syncPosition: 112, ranges: [{ start: 95, end: 114 }], behindLive: false, paused: false, sinceRecoveryMs: 1000 };
+
+test("after a media recovery the player seeks to the buffered live sync position", () => {
+    expect(recoveryLiveSeek(recovered)).toEqual({ kind: "seek", to: 112 });
+    expect(recoveryLiveSeek({ ...recovered, ranges: [{ start: 95, end: 101 }, { start: 110, end: 113 }] })).toEqual({ kind: "seek", to: 112 });
+});
+
+test("the recovery seek ignores the drift snap cooldown and fires within its own window", () => {
+    expect(recoveryLiveSeek({ ...recovered, sinceRecoveryMs: RECOVERY_LIVE_SEEK_WINDOW_MS })).toEqual({ kind: "seek", to: 112 });
+    expect(recoveryLiveSeek({ ...recovered, sinceRecoveryMs: RECOVERY_LIVE_SEEK_WINDOW_MS + 1 })).toEqual({ kind: "done" });
+});
+
+test("the recovery seek waits until the live sync position is buffered", () => {
+    expect(recoveryLiveSeek({ ...recovered, ranges: [{ start: 95, end: 108 }] })).toEqual({ kind: "wait" });
+    expect(recoveryLiveSeek({ ...recovered, ranges: [{ start: 95, end: 112.2 }] })).toEqual({ kind: "wait" });
+    expect(recoveryLiveSeek({ ...recovered, ranges: [] })).toEqual({ kind: "wait" });
+    expect(recoveryLiveSeek({ ...recovered, syncPosition: null })).toEqual({ kind: "wait" });
+    expect(recoveryLiveSeek({ ...recovered, syncPosition: Number.NaN })).toEqual({ kind: "wait" });
+});
+
+test("the recovery seek leaves a player already near live alone", () => {
+    expect(recoveryLiveSeek({ ...recovered, syncPosition: 100 + RECOVERY_LIVE_SEEK_MIN_BEHIND_S - 0.1 })).toEqual({ kind: "wait" });
+    expect(recoveryLiveSeek({ ...recovered, syncPosition: 99 })).toEqual({ kind: "wait" });
+});
+
+test("the recovery seek never yanks a viewer who is behind live or paused", () => {
+    expect(recoveryLiveSeek({ ...recovered, behindLive: true })).toEqual({ kind: "done" });
+    expect(recoveryLiveSeek({ ...recovered, paused: true })).toEqual({ kind: "done" });
 });

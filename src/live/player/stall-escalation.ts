@@ -10,6 +10,8 @@ export const STALL_TEARDOWN_FACTOR = 1.5;
 export const MEDIA_RECOVERY_COOLDOWN_MS = 10000;
 export const NUDGE_MIN_AHEAD_S = 0.5;
 export const STALL_RECOVERED_WINDOW_MS = 2000;
+export const RECOVERY_LIVE_SEEK_WINDOW_MS = 30000;
+export const RECOVERY_LIVE_SEEK_MIN_BEHIND_S = 2;
 
 export interface StallEpisode {
     startedAt: number;
@@ -96,4 +98,23 @@ export function nudgeSeekTarget(
         if (syncPosition >= range.start && range.end - syncPosition >= NUDGE_MIN_AHEAD_S) return syncPosition;
     }
     return null;
+}
+
+export interface RecoveryLiveSeekInput {
+    currentTime: number;
+    syncPosition: number | null;
+    ranges: Array<{ start: number; end: number }>;
+    behindLive: boolean;
+    paused: boolean;
+    sinceRecoveryMs: number;
+}
+
+export type RecoveryLiveSeek = { kind: "seek"; to: number } | { kind: "wait" } | { kind: "done" };
+
+export function recoveryLiveSeek(input: RecoveryLiveSeekInput): RecoveryLiveSeek {
+    if (input.behindLive || input.paused || input.sinceRecoveryMs > RECOVERY_LIVE_SEEK_WINDOW_MS) return { kind: "done" };
+    if (input.syncPosition === null || !Number.isFinite(input.syncPosition)) return { kind: "wait" };
+    if (input.syncPosition - input.currentTime < RECOVERY_LIVE_SEEK_MIN_BEHIND_S) return { kind: "wait" };
+    const target = nudgeSeekTarget(input.currentTime, input.syncPosition, input.ranges, false);
+    return target === null ? { kind: "wait" } : { kind: "seek", to: target };
 }
