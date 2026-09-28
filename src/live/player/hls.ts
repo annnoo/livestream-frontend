@@ -16,6 +16,7 @@ import { clampToAdvertisedWindow, farWindowFor, isPhoneUA, latencyTierFor, laten
 import { abrEstimateFor, stallGraceMsFor, startupRunwayFor } from "./far-tier.ts";
 import { bufferedAheadOf, STARTUP_RUNWAY_S, startupHoldOver } from "./startup-hold.ts";
 import { updateSeekBar } from "../seekbar.ts";
+import { driftSnapPosition } from "./drift-snap.ts";
 
 export interface HlsLevelEntry {
     index: number;
@@ -195,15 +196,32 @@ function startLowLatencyPlayer(g: number, src: string): void {
     track(() => window.clearInterval(holdTimer));
     startHLSBeacon(g);
     startLadderWatch(g, src);
+    let lastDriftSnapAt = 0;
     const dvrTimer = window.setInterval(() => {
         if (!isCurrent(g) || hlsInstance !== hls) {
             window.clearInterval(dvrTimer);
             return;
         }
         if (video.paused && Date.now() - ctx.lastProgressAt > PAUSE_SUSPEND_MS) suspendForPause();
+        if (!video.paused && !ctx.behindLive) {
+            const syncPos = hls.liveSyncPosition;
+            const snapTo = driftSnapPosition(hls.latency, hls.targetLatency, syncPos, syncPos === null ? 0 : bufferedRangeEndAt(syncPos), Date.now() - lastDriftSnapAt);
+            if (snapTo !== null) {
+                lastDriftSnapAt = Date.now();
+                console.log("live: drifted", hls.latency.toFixed(1), "s behind, target", hls.targetLatency?.toFixed(1), "s, snapping to live");
+                video.currentTime = snapTo;
+            }
+        }
         updateSeekBar();
     }, HLS_DVR_TICK_MS);
     track(() => window.clearInterval(dvrTimer));
+}
+
+function bufferedRangeEndAt(position: number): number {
+    for (let i = 0; i < video.buffered.length; i++) {
+        if (position >= video.buffered.start(i) && position <= video.buffered.end(i)) return video.buffered.end(i);
+    }
+    return 0;
 }
 
 function wireVideoLifecycle(g: number): void {
