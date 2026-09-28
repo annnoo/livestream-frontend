@@ -523,6 +523,100 @@ describe("R2: the seek back to live after a media recovery", () => {
     });
 });
 
+describe("M1: a stall event that playback ran through", () => {
+    for (const [name, cfg, realAt] of [
+        ["G=8", G8, 2000],
+        ["G=8, after the first check", G8, 6000],
+        ["G=20", G20, 9000],
+        ["G=20, after the first check", G20, 12000],
+        ["native", NATIVE, 6000],
+        ["native, after the first check", NATIVE, 9000],
+    ] as const) {
+        test(`${name}: a real stall at ${realAt} ms gets the full grace from that stall`, () => {
+            const sim = new Sim(cfg);
+            sim.send("waiting");
+            sim.playTo(realAt);
+            sim.send("waiting");
+            sim.to(realAt + 60000);
+            const ladder = stallLadder(cfg.graceMs, cfg.hlsJs);
+            expect(sim.steps()).toEqual(ladder.map((r) => [realAt + r.atMs, r.step]));
+        });
+    }
+
+    test("playback running through the stall event closes the episode at its first check", () => {
+        const sim = new Sim(G20);
+        sim.send("waiting");
+        sim.playTo(10000);
+        expect(sim.driver.open()).toBe(false);
+        expect(sim.timerAt).toBeNull();
+        sim.playTo(60000);
+        expect(sim.steps()).toEqual([]);
+    });
+
+    test("a straggler timeupdate right after a real stall does not close it", () => {
+        const sim = new Sim(G8);
+        sim.send("waiting");
+        sim.to(50);
+        sim.send("progress");
+        sim.to(60000);
+        expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"], [12000, "teardown"]]);
+    });
+
+    test("a second stall event during a real stall continues it", () => {
+        const sim = new Sim(G8);
+        sim.send("waiting");
+        sim.to(50);
+        sim.send("progress");
+        sim.to(3000);
+        sim.send("waiting");
+        sim.to(60000);
+        expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"], [12000, "teardown"]]);
+    });
+
+    test("a playing event confirms the stall, so a quick re-stall continues the episode", () => {
+        const sim = new Sim(G8);
+        sim.send("waiting");
+        sim.to(300);
+        sim.send("playing");
+        sim.playTo(1300);
+        sim.send("waiting");
+        sim.to(60000);
+        expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"], [12000, "teardown"]]);
+    });
+});
+
+describe("M2: the stall caused by the seek back to live", () => {
+    function seekBackToLive(): Sim {
+        const sim = new Sim(G8);
+        sim.send("waiting");
+        sim.to(10600);
+        expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"]]);
+        sim.send("playing");
+        sim.playTo(11350);
+        sim.to(11400);
+        sim.send("progress", view(100, 112, 115));
+        expect(liveSeeks(sim)).toEqual([[11400, 112]]);
+        sim.to(11450);
+        sim.send("waiting");
+        return sim;
+    }
+
+    test("the seek's own waiting starts a fresh episode instead of taking the teardown", () => {
+        const sim = seekBackToLive();
+        sim.to(12100);
+        sim.send("playing");
+        sim.playTo(30000);
+        expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"]]);
+        expect(sim.driver.open()).toBe(false);
+    });
+
+    test("a stall that persists after the seek gets the full grace from that stall", () => {
+        const sim = seekBackToLive();
+        sim.to(60000);
+        expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"], [15450, "reload"], [19450, "recover-media"], [23450, "teardown"]]);
+    });
+});
+
 function mulberry32(seed: number): () => number {
     let a = seed >>> 0;
     return () => {
@@ -543,6 +637,11 @@ interface EpisodeTrack {
     steps: string[];
 }
 
+interface RealStallGuard {
+    from: number;
+    steps: number;
+}
+
 function runRandomSequence(seed: number): string | null {
     const rand = mulberry32(seed);
     const pick = <T>(items: readonly T[]): T => items[Math.floor(rand() * items.length)];
@@ -554,6 +653,7 @@ function runRandomSequence(seed: number): string | null {
     const sim = new Sim(cfg);
     sim.timerLateMs = lateMs;
     let episode: EpisodeTrack | null = null;
+    let guard: RealStallGuard | null = null;
     let failure: string | null = null;
     let step = 0;
     const fail = (message: string) => {
@@ -562,6 +662,7 @@ function runRandomSequence(seed: number): string | null {
     sim.onAction = (action) => {
         if (action.kind === "close") {
             episode = null;
+            guard = null;
             return;
         }
         if (action.kind === "seek-live") {
@@ -570,10 +671,20 @@ function runRandomSequence(seed: number): string | null {
         }
         const stallStep = action.kind === "reload" || ((action.kind === "recover-media" || action.kind === "teardown") && action.cause === "stall");
         if (!stallStep) {
-            if (action.kind === "teardown") episode = null;
+            if (action.kind === "teardown") {
+                episode = null;
+                guard = null;
+            }
             return;
         }
         if (sim.paused) fail(`${action.kind} while paused`);
+        if (guard !== null) {
+            const g: RealStallGuard = guard;
+            const rung = ladder[g.steps];
+            if (rung && sim.now - g.from < rung.atMs) fail(`${action.kind} ${sim.now - g.from} ms after a real stall that followed a stall playback ran through, before ${rung.atMs}`);
+            g.steps += 1;
+            if (action.kind === "teardown") guard = null;
+        }
         if (episode === null) {
             fail(`${action.kind} without an open episode`);
             return;
@@ -588,7 +699,10 @@ function runRandomSequence(seed: number): string | null {
     sim.afterInput = () => {
         const open = sim.driver.open();
         if (open && episode === null) episode = { startedAt: sim.now, steps: [] };
-        if (!open) episode = null;
+        if (!open) {
+            episode = null;
+            guard = null;
+        }
         if (open && sim.timerAt === null) fail("open episode without a pending timer");
         if (episode !== null && sim.now - episode.startedAt > bound) fail(`episode open for ${sim.now - episode.startedAt} ms`);
     };
@@ -597,6 +711,14 @@ function runRandomSequence(seed: number): string | null {
         const syncPosition = rand() < 0.1 ? null : currentTime + rand() * 15;
         const end = currentTime + rand() * 20;
         return { currentTime, syncPosition, ranges: [{ start: currentTime - rand() * 5, end }], behindLive: rand() < 0.1 };
+    };
+    const spuriousThenReal = () => {
+        const idle = !sim.paused && !sim.driver.open();
+        sim.send("waiting");
+        if (!idle) return;
+        sim.playTo(sim.now + 1000 + rand() * cfg.graceMs);
+        sim.send("waiting");
+        if (sim.driver.open()) guard = { from: sim.now, steps: 0 };
     };
     for (step = 0; step < RANDOM_STEPS && failure === null; step++) {
         const r = rand();
@@ -610,6 +732,7 @@ function runRandomSequence(seed: number): string | null {
         else if (r < 0.64) sim.send("drift-snap");
         else if (r < 0.66) sim.send("error");
         else if (r < 0.72) sim.send("progress", randomView());
+        else if (r < 0.78) spuriousThenReal();
         else sim.to(sim.now + (rand() < 0.2 ? rand() * cfg.graceMs * 2 : rand() * 2500));
         if (episode !== null) {
             const ep: EpisodeTrack = episode;

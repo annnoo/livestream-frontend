@@ -48,6 +48,7 @@ export interface StallEpisode {
     taken: number;
     stepAt: number;
     since: number;
+    confirmed: boolean;
 }
 
 export type StallPhase =
@@ -60,6 +61,7 @@ export interface StallMachine {
     paused: boolean;
     progressAt: number;
     ownSeekAt: number;
+    liveSeekAt: number;
     recoverAt: number;
     mediaRecoveredAt: number;
     liveSeekUntil: number | null;
@@ -73,6 +75,7 @@ export function newStallMachine(paused: boolean, mediaRecoveredAt = Number.NEGAT
         paused,
         progressAt: Number.NEGATIVE_INFINITY,
         ownSeekAt: Number.NEGATIVE_INFINITY,
+        liveSeekAt: Number.NEGATIVE_INFINITY,
         recoverAt: Number.NEGATIVE_INFINITY,
         mediaRecoveredAt,
         liveSeekUntil: null,
@@ -101,6 +104,15 @@ function nextRungAt(ladder: StallRung[], episode: StallEpisode): number {
 
 function freshSince(m: StallMachine, now: number, since: number): boolean {
     return m.progressAt > since && now - m.progressAt < STALL_FRESH_PROGRESS_MS;
+}
+
+function stallConfirmed(episode: StallEpisode): boolean {
+    return episode.confirmed || episode.taken > 0;
+}
+
+function supersedesEpisode(m: StallMachine, episode: StallEpisode, now: number): boolean {
+    if (now - m.liveSeekAt < OWN_ACTION_SETTLE_MS) return true;
+    return !stallConfirmed(episode) && freshSince(m, now, episode.startedAt);
 }
 
 function close(m: StallMachine, out: StallAction[]): void {
@@ -152,7 +164,12 @@ function evaluate(m: StallMachine, ladder: StallRung[], now: number, out: StallA
         evaluate(m, ladder, now, out);
         return;
     }
-    if (freshSince(m, now, phase.since)) {
+    if (!stallConfirmed(phase)) {
+        if (freshSince(m, now, phase.startedAt)) {
+            close(m, out);
+            return;
+        }
+    } else if (freshSince(m, now, phase.since)) {
         m.phase = { ...phase, kind: "resumed", since: now };
         return;
     }
@@ -170,6 +187,7 @@ function checkLiveSeek(m: StallMachine, view: LiveView, now: number, out: StallA
     m.liveSeekUntil = null;
     if (decision.kind === "seek") {
         m.ownSeekAt = now;
+        m.liveSeekAt = now;
         out.push({ kind: "seek-live", to: decision.to });
     }
 }
@@ -179,9 +197,10 @@ function apply(m: StallMachine, ladder: StallRung[], cfg: StallConfig, ev: Stall
     switch (ev.kind) {
         case "waiting": {
             if (m.paused) return;
+            if (m.phase.kind !== "idle" && supersedesEpisode(m, m.phase, now)) close(m, out);
             const phase = m.phase;
             if (phase.kind === "idle") {
-                m.phase = { kind: "stalled", startedAt: now, taken: 0, stepAt: now, since: now };
+                m.phase = { kind: "stalled", startedAt: now, taken: 0, stepAt: now, since: now, confirmed: false };
             } else if (phase.kind === "resumed") {
                 m.phase = { ...phase, kind: "stalled", since: now };
             }
@@ -190,7 +209,7 @@ function apply(m: StallMachine, ladder: StallRung[], cfg: StallConfig, ev: Stall
         }
         case "playing": {
             const phase = m.phase;
-            if (phase.kind === "stalled") m.phase = { ...phase, kind: "resumed", since: now };
+            if (phase.kind === "stalled") m.phase = { ...phase, kind: "resumed", since: now, confirmed: true };
             return;
         }
         case "progress":
