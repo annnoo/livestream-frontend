@@ -52,10 +52,20 @@ export function rttFromTiming(timing: RequestTiming | null | undefined): number 
     return responseStart - requestStart;
 }
 
-export function resourceTimingOf(url: string): RequestTiming | null {
+export interface TimedEntry extends RequestTiming {
+    startTime: number;
+}
+
+export function timingSince<T extends TimedEntry>(entries: readonly T[], since: number): T | null {
+    for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i].startTime >= since) return entries[i];
+    }
+    return null;
+}
+
+export function resourceTimingOf(url: string, since: number): RequestTiming | null {
     try {
-        const entries = performance.getEntriesByName(new URL(url, location.href).href, "resource");
-        return (entries[entries.length - 1] as PerformanceResourceTiming | undefined) ?? null;
+        return timingSince(performance.getEntriesByName(new URL(url, location.href).href, "resource") as PerformanceResourceTiming[], since);
     } catch {
         return null;
     }

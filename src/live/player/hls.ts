@@ -394,6 +394,7 @@ export function startHLSTransport(g: number): void {
         if (!isCurrent(g)) return;
         let probe = FAILED_PROBE;
         let primed: PrimedMaster | null = null;
+        const probeStartedAt = performance.now();
         try {
             const res = await fetch(src, { credentials: "include" });
             const body = await res.text().catch(() => "");
@@ -421,7 +422,7 @@ export function startHLSTransport(g: number): void {
             startLowLatencyPlayer(g, src, primed);
             return;
         }
-        let rttMs = primed ? rttFromTiming(resourceTimingOf(src)) : null;
+        let rttMs = primed ? rttFromTiming(resourceTimingOf(src, probeStartedAt)) : null;
         if (needsRttFetch(path, ctx.edgeServed, rttMs)) {
             try {
                 const t0 = performance.now();

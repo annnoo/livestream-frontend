@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { HlsConfig, LoaderCallbacks, LoaderConfiguration, LoaderContext, LoaderStats, PlaylistLoaderContext } from "hls.js";
-import { FAILED_PROBE, needsRttFetch, primedMasterLoader, probeOutcome, rttFromTiming, startPathFor } from "../src/live/player/master-probe.ts";
+import { FAILED_PROBE, needsRttFetch, primedMasterLoader, probeOutcome, rttFromTiming, startPathFor, timingSince } from "../src/live/player/master-probe.ts";
 
 const master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000\nsource/index.m3u8?ll=1\n";
 
@@ -146,4 +146,21 @@ test("abort before delivery suppresses the primed response", async () => {
     await Promise.resolve();
     expect(seen.length).toBe(0);
     loader.destroy();
+});
+
+test("only a timing entry that started with the current probe is used", () => {
+    const stale = { startTime: 100, requestStart: 110, responseStart: 400 };
+    const current = { startTime: 5000, requestStart: 5010, responseStart: 5042 };
+    expect(timingSince([stale], 4999)).toBeNull();
+    expect(rttFromTiming(timingSince([stale], 4999))).toBeNull();
+    expect(timingSince([stale, current], 4999)).toBe(current);
+    expect(rttFromTiming(timingSince([stale, current], 4999))).toBe(32);
+    expect(timingSince([current], 5000)).toBe(current);
+    expect(timingSince([], 0)).toBeNull();
+});
+
+test("a stale entry recorded after the current one is still skipped", () => {
+    const current = { startTime: 5000, requestStart: 5010, responseStart: 5042 };
+    const stale = { startTime: 100, requestStart: 110, responseStart: 400 };
+    expect(timingSince([current, stale], 4999)).toBe(current);
 });
