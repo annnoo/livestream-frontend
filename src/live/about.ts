@@ -1,4 +1,4 @@
-import { buildAvatar, buildProfileLinks, followerLabel, loadProfile, type Profile, type ProfilePanel } from "../profile-card.ts";
+import { buildChannelAvatar, buildProfileLinks, followerLabel, loadProfile, type Profile, type ProfilePanel } from "../profile-card.ts";
 import { isSafeHttpLink } from "./about/panels.ts";
 import { cardImageError, validateCardForm, type CardType } from "./about/card-form.ts";
 import { subscriberBadgeAssetPath, subscriberBadgeTitle } from "../chat/badges.ts";
@@ -63,7 +63,8 @@ let isOwner = false;
 
 export function applyChannelIdentity(profile: Profile | null): void {
     channelAvatarWrapEl.replaceChildren();
-    if (profile) channelAvatarWrapEl.appendChild(buildAvatar(profile, true));
+    const avatar = buildChannelAvatar(profile, ctx.displayUsername);
+    if (avatar) channelAvatarWrapEl.appendChild(avatar);
 }
 
 function buildPanelCard(panel: ProfilePanel, owner: boolean): HTMLElement {

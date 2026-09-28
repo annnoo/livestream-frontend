@@ -23,7 +23,7 @@ import { wireChatOverflow, wireControls } from "./live/controls.ts";
 import { startChannelRail } from "./live/channel-rail.ts";
 import { syncLayout } from "./live/layout.ts";
 import { beginTransport, enterTerminal, setOfflineArt } from "./live/player/lifecycle.ts";
-import { loadProfile, offlineArtUrl } from "./profile-card.ts";
+import { loadProfileWithRetry, offlineArtUrl } from "./profile-card.ts";
 import { initOwnerCards, loadAboutClips, loadStreamActivity, mountAboutCard } from "./live/about.ts";
 import { canUseHlsJs, canUseNativeHLS } from "./live/player/hls-support.ts";
 import { openLoginModal, wireLoginModal } from "./live/login-modal.ts";
@@ -245,8 +245,7 @@ async function boot(): Promise<void> {
         }
     }
     if (!chatPopout) {
-        void loadProfile(ctx.username).then(profile => {
-            if (generation !== bootGeneration) return;
+        void loadProfileWithRetry(ctx.username, () => generation === bootGeneration, profile => {
             if (profile) setOfflineArt(offlineArtUrl(profile));
             mountAboutCard(profile);
         });
