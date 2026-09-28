@@ -15,6 +15,29 @@ export function stallRecovered(sinceProgressMs: number, paused: boolean): boolea
     return paused || sinceProgressMs < STALL_RECOVERED_WINDOW_MS;
 }
 
+export interface StallEpisode {
+    startedAt: number;
+    progressAt: number;
+    taken: number;
+    playingAt: number | null;
+}
+
+export function stallEpisodeOnWaiting(episode: StallEpisode | null, now: number, lastProgressAt: number): StallEpisode {
+    if (!episode || !stallEpisodeContinues(episode, lastProgressAt)) {
+        return { startedAt: now, progressAt: lastProgressAt, taken: 0, playingAt: null };
+    }
+    return episode;
+}
+
+function stallEpisodeContinues(episode: StallEpisode, lastProgressAt: number): boolean {
+    if (episode.taken === 0) return episode.progressAt === lastProgressAt;
+    return episode.playingAt === null || lastProgressAt - episode.playingAt < STALL_RECOVERED_WINDOW_MS;
+}
+
+export function stallEpisodeOnPlaying(episode: StallEpisode | null, now: number): void {
+    if (episode) episode.playingAt = now;
+}
+
 export function stallLadder(graceMs: number, hlsJs: boolean): StallRung[] {
     if (!hlsJs) return [{ step: "teardown", atMs: graceMs }];
     return [

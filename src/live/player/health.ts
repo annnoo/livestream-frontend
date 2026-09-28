@@ -4,13 +4,7 @@ import { ctx, isCurrent, track } from "./context.ts";
 import { HEALTH_CHECK_INTERVAL_MS, HEALTH_STALE_MS, HEALTH_STUCK_MS, WAITING_STALL_MS } from "../constants.ts";
 import { beginTransport, clearRetryTimer, restartAfterFailure } from "./lifecycle.ts";
 import { hlsLiveSyncPosition, recoverHlsMedia, resumeHlsLoad } from "./hls.ts";
-import { mediaErrorStep, nextStallCheckMs, nudgeSeekTarget, stallLadder, stallRecovered, stallStepDue, stallTeardownMs, type StallRung, type StallStep } from "./stall-escalation.ts";
-
-interface StallEpisode {
-    startedAt: number;
-    progressAt: number;
-    taken: number;
-}
+import { mediaErrorStep, nextStallCheckMs, nudgeSeekTarget, stallEpisodeOnPlaying, stallEpisodeOnWaiting, stallLadder, stallRecovered, stallStepDue, stallTeardownMs, type StallEpisode, type StallRung, type StallStep } from "./stall-escalation.ts";
 
 let waitingTimer: number | null = null;
 let stallGraceMs = WAITING_STALL_MS;
@@ -152,19 +146,26 @@ export function attachVideoFailureListeners(g: number): void {
     };
     const onWaiting = () => {
         if (!isCurrent(g)) return;
-        if (!stallEpisode || (stallEpisode.taken === 0 && stallEpisode.progressAt !== ctx.lastProgressAt)) {
+        const episode = stallEpisodeOnWaiting(stallEpisode, Date.now(), ctx.lastProgressAt);
+        if (episode !== stallEpisode) {
             clearWaitingTimer();
-            stallEpisode = { startedAt: Date.now(), progressAt: ctx.lastProgressAt, taken: 0 };
+            stallEpisode = episode;
         }
         scheduleStallCheck(g);
+    };
+    const onPlaying = () => {
+        if (!isCurrent(g)) return;
+        stallEpisodeOnPlaying(stallEpisode, Date.now());
     };
 
     video.addEventListener("error", onError);
     video.addEventListener("stalled", onWaiting);
     video.addEventListener("waiting", onWaiting);
+    video.addEventListener("playing", onPlaying);
 
     track(() => video.removeEventListener("error", onError));
     track(() => video.removeEventListener("stalled", onWaiting));
     track(() => video.removeEventListener("waiting", onWaiting));
+    track(() => video.removeEventListener("playing", onPlaying));
     track(clearWaitingTimer);
 }

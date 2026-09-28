@@ -4,10 +4,14 @@ import {
     MEDIA_RECOVERY_COOLDOWN_MS,
     nextStallCheckMs,
     nudgeSeekTarget,
+    stallEpisodeOnPlaying,
+    stallEpisodeOnWaiting,
     stallLadder,
     stallRecovered,
     stallStepDue,
     stallTeardownMs,
+    type StallEpisode,
+    type StallStep,
 } from "../src/live/player/stall-escalation.ts";
 
 test("hls.js stalls escalate reload, media recovery, then teardown", () => {
@@ -90,4 +94,55 @@ test("a stall counts as recovered only with fresh progress or a pause", () => {
     expect(stallRecovered(2000, false)).toBe(false);
     expect(stallRecovered(4000, false)).toBe(false);
     expect(stallRecovered(60000, true)).toBe(true);
+});
+
+function stepAt(episode: StallEpisode, now: number): StallStep | null {
+    const due = stallStepDue(stallLadder(8000, true), now - episode.startedAt, episode.taken);
+    if (!due) return null;
+    episode.taken = due.taken;
+    return due.step;
+}
+
+test("a stall after a recovery that played on runs the steps from the first rung", () => {
+    const first = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stepAt(first, 4000)).toBe("reload");
+    stallEpisodeOnPlaying(first, 4500);
+    const second = stallEpisodeOnWaiting(first, 9000, 8900);
+    expect(second).not.toBe(first);
+    expect(second.taken).toBe(0);
+    expect(stepAt(second, 12000)).toBeNull();
+    expect(stepAt(second, 13000)).toBe("reload");
+    expect(stepAt(second, 17000)).toBe("recover-media");
+});
+
+test("a stall after media recovery also starts over once playback resumed", () => {
+    const first = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stepAt(first, 9000)).toBe("recover-media");
+    stallEpisodeOnPlaying(first, 9500);
+    const second = stallEpisodeOnWaiting(first, 20000, 19900);
+    expect(second.taken).toBe(0);
+    expect(stepAt(second, 24000)).toBe("reload");
+});
+
+test("the nudge's own progress and a brief playing keep the ladder climbing", () => {
+    const first = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stepAt(first, 4000)).toBe("reload");
+    expect(stallEpisodeOnWaiting(first, 4100, 4000)).toBe(first);
+    stallEpisodeOnPlaying(first, 4050);
+    expect(stallEpisodeOnWaiting(first, 5000, 4900)).toBe(first);
+    expect(stepAt(first, 8000)).toBe("recover-media");
+});
+
+test("progress without a playing event after a step keeps the episode", () => {
+    const first = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stepAt(first, 4000)).toBe("reload");
+    expect(stallEpisodeOnWaiting(first, 30000, 29000)).toBe(first);
+});
+
+test("a stall that cleared before any step starts a new episode on fresh progress", () => {
+    const first = stallEpisodeOnWaiting(null, 0, 0);
+    expect(stallEpisodeOnWaiting(first, 1000, 0)).toBe(first);
+    const second = stallEpisodeOnWaiting(first, 3000, 2500);
+    expect(second).not.toBe(first);
+    expect(second.startedAt).toBe(3000);
 });
