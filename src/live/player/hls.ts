@@ -17,6 +17,7 @@ import { abrEstimateFor, stallGraceMsFor, startupRunwayFor } from "./far-tier.ts
 import { bufferedAheadOf, STARTUP_RUNWAY_S, startupHoldOver } from "./startup-hold.ts";
 import { updateSeekBar } from "../seekbar.ts";
 import { driftSnapPosition } from "./drift-snap.ts";
+import { decayedTargetLatency } from "./stall-decay.ts";
 
 export interface HlsLevelEntry {
     index: number;
@@ -167,8 +168,10 @@ function startLowLatencyPlayer(g: number, src: string): void {
         if (!isCurrent(g) || hlsInstance !== hls) return;
         renderQualityMenu();
     });
+    let lastTargetChangeAt = Date.now();
     hls.on(Hls.Events.ERROR, (_event, data) => {
         if (!isCurrent(g) || hlsInstance !== hls) return;
+        if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) lastTargetChangeAt = Date.now();
         if (data.details === Hls.ErrorDetails.BUFFER_FULL_ERROR) return;
         if (!data.fatal) return;
         console.warn("live: hls.js fatal error, restarting", data);
@@ -205,11 +208,19 @@ function startLowLatencyPlayer(g: number, src: string): void {
         if (video.paused && Date.now() - ctx.lastProgressAt > PAUSE_SUSPEND_MS) suspendForPause();
         if (!video.paused && !ctx.behindLive) {
             const syncPos = hls.liveSyncPosition;
-            const snapTo = driftSnapPosition(hls.latency, hls.targetLatency, syncPos, syncPos === null ? 0 : bufferedRangeEndAt(syncPos), Date.now() - lastDriftSnapAt);
+            const snapTo = driftSnapPosition(hls.latency, hls.targetLatency, hls.latestLevelDetails?.targetduration ?? Number.NaN, syncPos, syncPos === null ? 0 : bufferedRangeEndAt(syncPos), Date.now() - lastDriftSnapAt);
             if (snapTo !== null) {
                 lastDriftSnapAt = Date.now();
                 console.log("live: drifted", hls.latency.toFixed(1), "s behind, target", hls.targetLatency?.toFixed(1), "s, snapping to live");
                 video.currentTime = snapTo;
+            }
+            const details = hls.latestLevelDetails;
+            const base = details ? details.partHoldBack || details.holdBack : Number.NaN;
+            const decayed = decayedTargetLatency(hls.targetLatency, base, Date.now() - lastTargetChangeAt);
+            if (decayed !== null) {
+                lastTargetChangeAt = Date.now();
+                console.log("live: no stall for a while, lowering target latency to", decayed.toFixed(1), "s");
+                hls.targetLatency = decayed;
             }
         }
         updateSeekBar();

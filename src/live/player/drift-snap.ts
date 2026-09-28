@@ -4,6 +4,7 @@ export const DRIFT_SNAP_COOLDOWN_MS = 30000;
 export function driftSnapPosition(
     latencyS: number | null,
     targetS: number | null,
+    targetDurationS: number,
     syncPositionS: number | null,
     bufferedEndS: number,
     sinceLastSnapMs: number,
@@ -12,7 +13,8 @@ export function driftSnapPosition(
     if (!Number.isFinite(latencyS) || !Number.isFinite(targetS) || !Number.isFinite(syncPositionS)) return null;
     if (targetS <= 0 || syncPositionS <= 0) return null;
     if (sinceLastSnapMs < DRIFT_SNAP_COOLDOWN_MS) return null;
-    if (latencyS - targetS <= DRIFT_SNAP_EXCESS_S) return null;
+    const rateCatchUpReach = Number.isFinite(targetDurationS) && targetDurationS > 0 ? targetS + targetDurationS : DRIFT_SNAP_EXCESS_S;
+    if (latencyS - targetS < Math.min(DRIFT_SNAP_EXCESS_S, rateCatchUpReach)) return null;
     if (syncPositionS > bufferedEndS) return null;
     return syncPositionS;
 }
