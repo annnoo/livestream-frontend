@@ -11,7 +11,7 @@ import { goOffline, resetRetryBackoff, restartAfterFailure, setPlaying } from ".
 import { latencyTierFor } from "../live/player/latency-window.ts";
 import { abrEstimateFor } from "../live/player/far-tier.ts";
 import { attachVideoFailureListeners } from "./health.ts";
-import { needsRttFetch, primedMasterLoader, resourceTimingOf, rttFromTiming, type PrimedMaster } from "../live/player/master-probe.ts";
+import { browserResourceTimingEnv, needsRttFetch, primedMasterLoader, RESOURCE_TIMING_WAIT_MS, rttFromTiming, watchResourceTiming, type PrimedMaster } from "../live/player/master-probe.ts";
 import { bufferedAheadOf, startupHoldOver } from "../live/player/startup-hold.ts";
 import { LL_STARTUP_RUNWAY_S, LL_TRIM_TICK_MS, lowLatencyForToken, lowLatencyHlsConfig, masterMode, newLowLatencyTrim, trimLowLatency } from "../player-shared/low-latency.ts";
 
@@ -173,18 +173,24 @@ export function startHLSTransport(g: number): void {
             return;
         }
         let primed: PrimedMaster | null = null;
-        const probeStartedAt = performance.now();
+        const probeTiming = watchResourceTiming(performance.now(), browserResourceTimingEnv(src));
         try {
             const res = await fetch(src, { credentials: "include" });
             const body = await res.text();
             if (res.ok && body) primed = { url: res.url || src, text: body };
         } catch {}
-        if (!isCurrent(g)) return;
+        if (!isCurrent(g)) {
+            probeTiming.stop();
+            return;
+        }
         if (lowLatency) {
+            probeTiming.stop();
             startLowLatencyPlayer(g, src, primed);
             return;
         }
-        let rttMs = primed ? rttFromTiming(resourceTimingOf(src, probeStartedAt)) : null;
+        let rttMs = primed ? rttFromTiming(await probeTiming.settle(RESOURCE_TIMING_WAIT_MS)) : null;
+        probeTiming.stop();
+        if (!isCurrent(g)) return;
         if (needsRttFetch("standard", ctx.edgeServed, rttMs)) {
             try {
                 const t0 = performance.now();

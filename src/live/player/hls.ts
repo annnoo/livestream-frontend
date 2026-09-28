@@ -19,7 +19,7 @@ import { abrEstimateFor, stallGraceMsFor, startupRunwayFor } from "./far-tier.ts
 import { bufferedAheadOf, STARTUP_RUNWAY_S, startupHoldOver } from "./startup-hold.ts";
 import { updateSeekBar } from "../seekbar.ts";
 import { LL_STARTUP_RUNWAY_S, lowLatencyAvailable as lowLatencyAvailableFor, lowLatencyHlsConfig, masterMode, newLowLatencyTrim, trimLowLatency } from "../../player-shared/low-latency.ts";
-import { FAILED_PROBE, needsRttFetch, primedMasterLoader, probeOutcome, resourceTimingOf, rttFromTiming, startPathFor, type PrimedMaster } from "./master-probe.ts";
+import { browserResourceTimingEnv, FAILED_PROBE, needsRttFetch, primedMasterLoader, probeOutcome, RESOURCE_TIMING_WAIT_MS, rttFromTiming, startPathFor, watchResourceTiming, type PrimedMaster } from "./master-probe.ts";
 
 export interface HlsLevelEntry {
     index: number;
@@ -394,7 +394,7 @@ export function startHLSTransport(g: number): void {
         if (!isCurrent(g)) return;
         let probe = FAILED_PROBE;
         let primed: PrimedMaster | null = null;
-        const probeStartedAt = performance.now();
+        const probeTiming = watchResourceTiming(performance.now(), browserResourceTimingEnv(src));
         try {
             const res = await fetch(src, { credentials: "include" });
             const body = await res.text().catch(() => "");
@@ -404,8 +404,12 @@ export function startHLSTransport(g: number): void {
                 if (body) primed = { url: res.url || src, text: body };
             }
         } catch {}
-        if (!isCurrent(g)) return;
+        if (!isCurrent(g)) {
+            probeTiming.stop();
+            return;
+        }
         const path = startPathFor(probe, ctx.transportKind === "hls-native", lowLatencyWanted());
+        if (path !== "standard") probeTiming.stop();
         if (path === "quality-locked") {
             enterQualityLockedTerminal();
             return;
@@ -422,7 +426,9 @@ export function startHLSTransport(g: number): void {
             startLowLatencyPlayer(g, src, primed);
             return;
         }
-        let rttMs = primed ? rttFromTiming(resourceTimingOf(src, probeStartedAt)) : null;
+        let rttMs = primed ? rttFromTiming(await probeTiming.settle(RESOURCE_TIMING_WAIT_MS)) : null;
+        probeTiming.stop();
+        if (!isCurrent(g)) return;
         if (needsRttFetch(path, ctx.edgeServed, rttMs)) {
             try {
                 const t0 = performance.now();

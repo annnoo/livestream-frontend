@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { HlsConfig, LoaderCallbacks, LoaderConfiguration, LoaderContext, LoaderStats, PlaylistLoaderContext } from "hls.js";
-import { FAILED_PROBE, needsRttFetch, primedMasterLoader, probeOutcome, rttFromTiming, startPathFor, timingSince } from "../src/live/player/master-probe.ts";
+import { FAILED_PROBE, needsRttFetch, primedMasterLoader, probeOutcome, rttFromTiming, startPathFor, timingSince, watchResourceTiming, type ResourceTimingEnv, type TimedEntry } from "../src/live/player/master-probe.ts";
 
 const master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000\nsource/index.m3u8?ll=1\n";
 
@@ -163,4 +163,91 @@ test("a stale entry recorded after the current one is still skipped", () => {
     const current = { startTime: 5000, requestStart: 5010, responseStart: 5042 };
     const stale = { startTime: 100, requestStart: 110, responseStart: 400 };
     expect(timingSince([current, stale], 4999)).toBe(current);
+});
+
+function fakeTimingEnv(buffered: TimedEntry[] = [], observable = true) {
+    const state = {
+        deliver: null as ((entries: readonly TimedEntry[]) => void) | null,
+        connected: false,
+        timers: [] as Array<{ fn: () => void; ms: number; cleared: boolean }>,
+    };
+    const env: ResourceTimingEnv = {
+        buffered: () => buffered,
+        observe: (onEntries) => {
+            if (!observable) return null;
+            state.deliver = onEntries;
+            state.connected = true;
+            return () => {
+                state.connected = false;
+            };
+        },
+        setTimeout: (fn, ms) => {
+            const timer = { fn, ms, cleared: false };
+            state.timers.push(timer);
+            return timer;
+        },
+        clearTimeout: (handle) => {
+            (handle as { cleared: boolean }).cleared = true;
+        },
+    };
+    return { env, state };
+}
+
+const probeEntry = { startTime: 5000, requestStart: 5010, responseStart: 5042 };
+
+test("with a full timing buffer the observer still delivers the probe's entry", async () => {
+    const { env, state } = fakeTimingEnv([]);
+    const watch = watchResourceTiming(4999, env);
+    const settled = watch.settle(250);
+    state.deliver?.([probeEntry]);
+    expect(rttFromTiming(await settled)).toBe(32);
+    expect(state.connected).toBe(false);
+    expect(state.timers[0].cleared).toBe(true);
+});
+
+test("an entry observed before settling is used without waiting", async () => {
+    const { env, state } = fakeTimingEnv([]);
+    const watch = watchResourceTiming(4999, env);
+    state.deliver?.([probeEntry]);
+    expect(rttFromTiming(await watch.settle(250))).toBe(32);
+    expect(state.timers.length).toBe(0);
+    expect(state.connected).toBe(false);
+});
+
+test("the buffered entry is read first when the buffer still has room", async () => {
+    const { env, state } = fakeTimingEnv([probeEntry]);
+    expect(rttFromTiming(await watchResourceTiming(4999, env).settle(250))).toBe(32);
+    expect(state.timers.length).toBe(0);
+});
+
+test("an observed entry from an earlier probe is ignored", async () => {
+    const { env, state } = fakeTimingEnv([]);
+    const watch = watchResourceTiming(4999, env);
+    const settled = watch.settle(250);
+    state.deliver?.([{ startTime: 100, requestStart: 110, responseStart: 400 }]);
+    expect(state.timers[0].cleared).toBe(false);
+    state.timers[0].fn();
+    expect(await settled).toBeNull();
+});
+
+test("the wait for an entry is bounded, then the timed fetch takes over", async () => {
+    const { env, state } = fakeTimingEnv([]);
+    const settled = watchResourceTiming(4999, env).settle(250);
+    expect(state.timers[0].ms).toBe(250);
+    state.timers[0].fn();
+    expect(await settled).toBeNull();
+    expect(state.connected).toBe(false);
+    expect(needsRttFetch("standard", false, rttFromTiming(await settled))).toBe(true);
+});
+
+test("without PerformanceObserver the buffer alone decides and nothing waits", async () => {
+    const { env, state } = fakeTimingEnv([], false);
+    expect(await watchResourceTiming(4999, env).settle(250)).toBeNull();
+    expect(state.timers.length).toBe(0);
+});
+
+test("stopping the watch disconnects the observer", () => {
+    const { env, state } = fakeTimingEnv([]);
+    watchResourceTiming(4999, env).stop();
+    expect(state.connected).toBe(false);
 });

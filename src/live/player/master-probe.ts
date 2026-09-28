@@ -63,12 +63,80 @@ export function timingSince<T extends TimedEntry>(entries: readonly T[], since: 
     return null;
 }
 
-export function resourceTimingOf(url: string, since: number): RequestTiming | null {
+export const RESOURCE_TIMING_WAIT_MS = 250;
+
+export interface ResourceTimingEnv {
+    buffered(): readonly TimedEntry[];
+    observe(onEntries: (entries: readonly TimedEntry[]) => void): (() => void) | null;
+    setTimeout(fn: () => void, ms: number): unknown;
+    clearTimeout(handle: unknown): void;
+}
+
+export interface ResourceTimingWatch {
+    settle(waitMs: number): Promise<RequestTiming | null>;
+    stop(): void;
+}
+
+export function browserResourceTimingEnv(url: string): ResourceTimingEnv {
+    let href = url;
     try {
-        return timingSince(performance.getEntriesByName(new URL(url, location.href).href, "resource") as PerformanceResourceTiming[], since);
-    } catch {
-        return null;
-    }
+        href = new URL(url, location.href).href;
+    } catch {}
+    return {
+        buffered: () => {
+            try {
+                return performance.getEntriesByName(href, "resource") as PerformanceResourceTiming[];
+            } catch {
+                return [];
+            }
+        },
+        observe: (onEntries) => {
+            try {
+                const observer = new PerformanceObserver((list) => onEntries(list.getEntriesByName(href, "resource") as PerformanceResourceTiming[]));
+                observer.observe({ type: "resource" });
+                return () => observer.disconnect();
+            } catch {
+                return null;
+            }
+        },
+        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+        clearTimeout: (handle) => window.clearTimeout(handle as number),
+    };
+}
+
+export function watchResourceTiming(since: number, env: ResourceTimingEnv): ResourceTimingWatch {
+    let observed: TimedEntry | null = null;
+    let wake: (() => void) | null = null;
+    let disconnect: (() => void) | null = env.observe((entries) => {
+        const hit = timingSince(entries, since);
+        if (!hit) return;
+        observed = hit;
+        wake?.();
+    });
+    const stop = (): void => {
+        disconnect?.();
+        disconnect = null;
+        wake = null;
+    };
+    const settle = (waitMs: number): Promise<RequestTiming | null> => {
+        const found = timingSince(env.buffered(), since) ?? observed;
+        if (found || !disconnect) {
+            stop();
+            return Promise.resolve(found);
+        }
+        return new Promise((resolve) => {
+            const timer = env.setTimeout(() => {
+                stop();
+                resolve(observed);
+            }, waitMs);
+            wake = () => {
+                env.clearTimeout(timer);
+                stop();
+                resolve(observed);
+            };
+        });
+    };
+    return { settle, stop };
 }
 
 export interface PrimedMaster {
