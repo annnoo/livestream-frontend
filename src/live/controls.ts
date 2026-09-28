@@ -47,6 +47,7 @@ import { isCinemaMode, exitCinemaMode, toggleCinemaMode } from "./cinema.ts";
 import { isBrowseMode, wireBrowseMode } from "./browse-mini.ts";
 import { wirePageLifecycle } from "./player/lifecycle.ts";
 import { hlsLiveSyncPosition, resumeHlsLoad } from "./player/hls.ts";
+import { stallRecoveryOwnsPlayhead } from "./player/health.ts";
 import { renderQualityMenu, wireQualityMenu } from "./quality-menu.ts";
 import { startFpsMeter, updateQuality } from "./stream-info.ts";
 import { wireSeekBar } from "./seekbar.ts";
@@ -138,7 +139,7 @@ function snapToEdgeOnPlay(): void {
         ctx.pauseSuspended = false;
         resumeHlsLoad();
     }
-    if (ctx.behindLive) return;
+    if (ctx.behindLive || stallRecoveryOwnsPlayhead()) return;
     const sync = hlsLiveSyncPosition();
     if (sync === null || sync <= 0) return;
     if (video.currentTime < sync - LIVE_EDGE_SNAP_S) video.currentTime = sync;

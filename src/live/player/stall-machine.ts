@@ -88,6 +88,10 @@ export function stallEpisodeOpen(m: StallMachine): boolean {
     return m.phase.kind !== "idle";
 }
 
+export function stallOwnsPlayhead(m: StallMachine, now: number): boolean {
+    return m.recovering !== null || (m.liveSeekUntil !== null && now <= m.liveSeekUntil);
+}
+
 export function stallDeadline(m: StallMachine, ladder: StallRung[]): number | null {
     const phase = m.phase;
     if (phase.kind === "idle") return null;
@@ -134,7 +138,7 @@ function takeStep(m: StallMachine, ladder: StallRung[], episode: StallEpisode, n
     episode.stepAt = now;
     episode.since = now;
     m.ownSeekAt = now;
-    if (rung.step === "teardown") {
+    if (rung.step === "teardown" || (rung.step === "recover-media" && now - m.recoverAt < RECOVERY_LIVE_SEEK_WINDOW_MS)) {
         teardown(m, "stall", out);
         return;
     }
@@ -164,12 +168,7 @@ function evaluate(m: StallMachine, ladder: StallRung[], now: number, out: StallA
         evaluate(m, ladder, now, out);
         return;
     }
-    if (!stallConfirmed(phase)) {
-        if (freshSince(m, now, phase.startedAt)) {
-            close(m, out);
-            return;
-        }
-    } else if (freshSince(m, now, phase.since)) {
+    if (freshSince(m, now, phase.since)) {
         m.phase = { ...phase, kind: "resumed", since: now };
         return;
     }
@@ -217,7 +216,6 @@ function apply(m: StallMachine, ladder: StallRung[], cfg: StallConfig, ev: Stall
             return;
         case "pause":
             m.paused = true;
-            if (now - m.recoverAt < OWN_ACTION_SETTLE_MS) return;
             m.liveSeekUntil = null;
             close(m, out);
             return;

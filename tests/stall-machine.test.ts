@@ -4,8 +4,10 @@ import {
     newStallMachine,
     OWN_ACTION_SETTLE_MS,
     STALL_RECHECK_MS,
+    STALL_FRESH_PROGRESS_MS,
     stallEpisodeOpen,
     stallInput,
+    stallOwnsPlayhead,
     type LiveView,
     type StallAction,
     type StallConfig,
@@ -15,11 +17,12 @@ import {
 interface Driver {
     input(ev: StallEvent): StallAction[];
     open(): boolean;
+    ownsPlayhead(now: number): boolean;
 }
 
 function machineDriver(cfg: StallConfig, paused: boolean): Driver {
     const m = newStallMachine(paused);
-    return { input: (ev) => stallInput(m, cfg, ev), open: () => stallEpisodeOpen(m) };
+    return { input: (ev) => stallInput(m, cfg, ev), open: () => stallEpisodeOpen(m), ownsPlayhead: (now) => stallOwnsPlayhead(m, now) };
 }
 
 const makeDriver: (cfg: StallConfig, paused: boolean) => Driver = machineDriver;
@@ -40,8 +43,13 @@ class Sim {
     failRecovery = false;
     timerLateMs = 0;
     log: Logged[] = [];
+    snaps: number[] = [];
+    progressLog: number[] = [];
+    sending: EventKind[] = [];
     driver: Driver;
     onAction: (action: StallAction) => void = () => {};
+    onSnap: () => void = () => {};
+    beforeInput: (kind: EventKind, view: LiveView) => void = () => {};
     afterInput: () => void = () => {};
 
     constructor(readonly cfg: StallConfig) {
@@ -49,11 +57,21 @@ class Sim {
     }
 
     send(kind: EventKind, view: LiveView = STILL): void {
+        this.beforeInput(kind, view);
         if (kind === "pause") this.paused = true;
-        if (kind === "play") this.paused = false;
+        if (kind === "play") {
+            this.paused = false;
+            if (this.cfg.hlsJs && !this.driver.ownsPlayhead(this.now)) {
+                this.snaps.push(this.now);
+                this.onSnap();
+            }
+        }
+        if (kind === "progress") this.progressLog.push(this.now);
         const ev = (kind === "progress" ? { kind, now: this.now, view } : { kind, now: this.now }) as StallEvent;
+        this.sending.push(kind);
         const actions = this.driver.input(ev);
         for (const action of actions) this.carry(action);
+        this.sending.pop();
         this.afterInput();
     }
 
@@ -71,10 +89,7 @@ class Sim {
         if (action.kind === "recover-media") {
             const wasPaused = this.paused;
             this.send(this.failRecovery ? "media-recovery-failed" : "media-recovered");
-            if (!this.failRecovery && !wasPaused) {
-                this.send("pause");
-                this.send("play");
-            }
+            if (!this.failRecovery && !wasPaused) this.send("play");
         }
         if (action.kind === "teardown") {
             this.timerAt = null;
@@ -361,26 +376,26 @@ describe("own seeks and media recovery", () => {
         expect(sim.steps()).toEqual([[0, "teardown"]]);
     });
 
-    test("the pause and play of the recovery itself do not close the episode", () => {
+    test("the play of the recovery itself does not close the episode", () => {
         const sim = new Sim(G8);
         sim.send("waiting");
         sim.to(8000);
         expect(sim.driver.open()).toBe(true);
         sim.to(8000 + OWN_ACTION_SETTLE_MS - 1);
-        sim.send("pause");
         sim.send("play");
         expect(sim.driver.open()).toBe(true);
         sim.to(20000);
         expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"], [12000, "teardown"]]);
     });
 
-    test("a viewer who pauses right after a recovery stops the episode before its next step", () => {
+    test("a viewer who pauses right after a recovery stops the episode at once", () => {
         const sim = new Sim(G8);
         sim.send("waiting");
         sim.to(8100);
         sim.send("pause");
-        sim.to(60000);
         expect(sim.driver.open()).toBe(false);
+        expect(sim.timerAt).toBeNull();
+        sim.to(60000);
         expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"]]);
     });
 
@@ -543,10 +558,12 @@ describe("M1: a stall event that playback ran through", () => {
         });
     }
 
-    test("playback running through the stall event closes the episode at its first check", () => {
+    test("playback running through the stall event closes the episode at its recheck without a step", () => {
         const sim = new Sim(G20);
         sim.send("waiting");
         sim.playTo(10000);
+        expect(sim.driver.open()).toBe(true);
+        sim.playTo(12000);
         expect(sim.driver.open()).toBe(false);
         expect(sim.timerAt).toBeNull();
         sim.playTo(60000);
@@ -610,10 +627,165 @@ describe("M2: the stall caused by the seek back to live", () => {
         expect(sim.driver.open()).toBe(false);
     });
 
-    test("a stall that persists after the seek gets the full grace from that stall", () => {
+    test("a stall that persists after the seek starts from step 1 and tears down at its recover-media rung", () => {
         const sim = seekBackToLive();
         sim.to(60000);
-        expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"], [15450, "reload"], [19450, "recover-media"], [23450, "teardown"]]);
+        expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"], [15450, "reload"], [19450, "teardown"]]);
+    });
+});
+
+describe("N1: a recover-media, live seek, stall cycle", () => {
+    function cycle(cfg: StallConfig, limitMs: number): Sim {
+        const sim = new Sim(cfg);
+        sim.send("waiting");
+        while (sim.now < limitMs && !sim.steps().some(([, s]) => s === "teardown")) {
+            const recoveries = sim.steps().filter(([, s]) => s === "recover-media").length;
+            sim.to(sim.now + 250);
+            if (sim.steps().filter(([, s]) => s === "recover-media").length === recoveries) continue;
+            sim.send("playing");
+            sim.playTo(sim.now + 750);
+            const c = 100 + sim.now / 1000;
+            sim.send("progress", view(c, c + 10, c + 13));
+            sim.to(sim.now + 50);
+            sim.send("waiting");
+        }
+        return sim;
+    }
+
+    for (const [name, cfg] of [["G=8", G8], ["G=20", G20]] as const) {
+        test(`${name}: an unplayable live edge gets one media recovery, then the teardown`, () => {
+            const sim = cycle(cfg, 300000);
+            const steps = sim.steps().map(([, s]) => s);
+            expect(steps).toEqual(["reload", "recover-media", "reload", "teardown"]);
+            expect(liveSeeks(sim).length).toBe(1);
+            const [recoveredAt] = sim.steps()[1];
+            const [teardownAt] = sim.steps()[3];
+            expect(teardownAt - recoveredAt).toBeLessThan(RECOVERY_LIVE_SEEK_WINDOW_MS);
+        });
+    }
+
+    test("a stall more than 30 s after the last media recovery recovers the media again", () => {
+        const sim = new Sim(G8);
+        sim.send("waiting");
+        sim.to(8000);
+        sim.send("playing");
+        sim.playTo(RECOVERY_LIVE_SEEK_WINDOW_MS + 1);
+        sim.send("waiting");
+        sim.to(60000);
+        expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"], [34001, "reload"], [38001, "recover-media"], [42001, "teardown"]]);
+    });
+
+    test("a stall soon after an error recovery takes the teardown at its recover-media rung", () => {
+        const sim = new Sim(G8);
+        sim.send("error");
+        sim.playTo(5000);
+        sim.send("waiting");
+        sim.to(60000);
+        expect(sim.steps()).toEqual([[0, "recover-media"], [9000, "reload"], [13000, "teardown"]]);
+    });
+});
+
+describe("N2: a stray playhead movement just before the first step", () => {
+    for (const [name, cfg] of [["G=8", G8], ["G=20", G20], ["native", NATIVE]] as const) {
+        test(`${name}: the step is taken at the recheck when playback stayed silent`, () => {
+            const ladder = stallLadder(cfg.graceMs, cfg.hlsJs);
+            const first = ladder[0].atMs;
+            const sim = new Sim(cfg);
+            sim.send("waiting");
+            sim.to(first - 500);
+            sim.send("progress");
+            sim.to(first);
+            expect(sim.driver.open()).toBe(true);
+            expect(sim.steps()).toEqual([]);
+            sim.to(first + 120000);
+            const at = first + STALL_RECHECK_MS;
+            const expected: Array<[number, string]> = [[at, ladder[0].step]];
+            let prev = at;
+            for (let i = 1; i < ladder.length; i++) {
+                prev = Math.max(ladder[i].atMs, prev + ladder[i].atMs - ladder[i - 1].atMs);
+                expected.push([prev, ladder[i].step]);
+            }
+            expect(sim.steps()).toEqual(expected);
+        });
+    }
+
+    test("a waiting after the stray movement takes the overdue step at once", () => {
+        const sim = new Sim(G8);
+        sim.send("waiting");
+        sim.to(3500);
+        sim.send("progress");
+        sim.to(5000);
+        sim.send("waiting");
+        expect(sim.steps()).toEqual([[5000, "reload"]]);
+    });
+});
+
+describe("M3: a pause right after a media recovery", () => {
+    test("is the viewer's own and cancels the seek back to live even if play follows", () => {
+        const sim = new Sim(G8);
+        sim.send("waiting");
+        sim.to(8000);
+        sim.to(8100);
+        sim.send("pause");
+        expect(sim.driver.open()).toBe(false);
+        sim.to(8200);
+        sim.send("play");
+        sim.to(8450);
+        sim.send("progress", view(100, 112, 116));
+        expect(liveSeeks(sim)).toEqual([]);
+        sim.to(8700);
+        sim.send("waiting");
+        sim.to(60000);
+        expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"], [12700, "reload"], [16700, "teardown"]]);
+    });
+});
+
+describe("M4: the edge snap on play during a recovery", () => {
+    test("the recovery's own play does not snap, so only the seek back to live moves the playhead", () => {
+        const sim = new Sim(G8);
+        sim.send("waiting");
+        sim.to(8000);
+        expect(sim.steps()).toEqual([[4000, "reload"], [8000, "recover-media"]]);
+        expect(sim.snaps).toEqual([]);
+        expect(sim.driver.ownsPlayhead(sim.now)).toBe(true);
+        sim.to(8300);
+        sim.send("progress", view(100, 112, 116));
+        expect(liveSeeks(sim)).toEqual([[8300, 112]]);
+        expect(sim.driver.ownsPlayhead(sim.now)).toBe(false);
+        sim.send("pause");
+        sim.send("play");
+        expect(sim.snaps).toEqual([8300]);
+    });
+
+    test("the error path's recovery holds the playhead until its window ends", () => {
+        const sim = new Sim(G8);
+        sim.send("error");
+        expect(sim.snaps).toEqual([]);
+        sim.to(RECOVERY_LIVE_SEEK_WINDOW_MS);
+        expect(sim.driver.ownsPlayhead(sim.now)).toBe(true);
+        sim.to(RECOVERY_LIVE_SEEK_WINDOW_MS + 1);
+        expect(sim.driver.ownsPlayhead(sim.now)).toBe(false);
+    });
+
+    test("a viewer's pause, seek, GO LIVE or drift snap hands the playhead back", () => {
+        for (const kind of ["pause", "seek", "go-live", "drift-snap"] as const) {
+            const sim = new Sim(G8);
+            sim.send("error");
+            sim.to(1000);
+            sim.send(kind);
+            expect(sim.driver.ownsPlayhead(sim.now)).toBe(false);
+            sim.send("play");
+            expect(sim.snaps).toEqual([1000]);
+        }
+    });
+
+    test("a recovery while paused never holds the playhead", () => {
+        const sim = new Sim(G8);
+        sim.send("pause");
+        sim.send("error");
+        expect(sim.driver.ownsPlayhead(sim.now)).toBe(false);
+        sim.send("play");
+        expect(sim.snaps).toEqual([0]);
     });
 });
 
@@ -635,7 +807,10 @@ const RANDOM_STEPS = 120;
 interface EpisodeTrack {
     startedAt: number;
     steps: string[];
+    confirmed: boolean;
 }
+
+const DIRECT_CLOSERS: ReadonlySet<EventKind> = new Set(["pause", "play", "seek", "go-live", "drift-snap", "waiting"]);
 
 interface RealStallGuard {
     from: number;
@@ -657,19 +832,49 @@ function runRandomSequence(seed: number): string | null {
     let failure: string | null = null;
     let step = 0;
     const fail = (message: string) => {
-        if (failure === null) failure = `seed ${seed} step ${step} t=${sim.now}: ${message}`;
+        if (failure === null) failure = `seed ${seed} step ${step} t=${sim.now}: ${message}`;    };
+    let recoveredAt: number | null = null;
+    let ownedUntil: number | null = null;
+    const withinRecoveryWindow = () => recoveredAt !== null && sim.now - recoveredAt < RECOVERY_LIVE_SEEK_WINDOW_MS;
+    const checkClose = () => {
+        const closer = sim.sending[sim.sending.length - 1];
+        if (episode === null || sim.paused || closer === undefined || DIRECT_CLOSERS.has(closer)) return;
+        const ep: EpisodeTrack = episode;
+        if (ep.confirmed || ep.steps.length > 0) return;
+        const after = sim.progressLog.filter((p) => p > ep.startedAt);
+        const early = after.some((p) => p <= sim.now - STALL_RECHECK_MS);
+        const recent = after.some((p) => sim.now - p < STALL_FRESH_PROGRESS_MS);
+        if (!early || !recent) fail(`unconfirmed episode closed on ${closer} without playback through a full recheck`);
+    };
+    sim.beforeInput = (kind, liveView) => {
+        if (kind === "playing" && episode !== null) episode.confirmed = true;
+        if (kind === "pause" || kind === "seek" || kind === "go-live" || kind === "drift-snap") ownedUntil = null;
+        if (kind === "progress" && liveView.behindLive) ownedUntil = null;
+    };
+    sim.onSnap = () => {
+        if (ownedUntil !== null && sim.now <= ownedUntil) fail("edge snap on play while the recovery owns the playhead");
     };
     sim.onAction = (action) => {
         if (action.kind === "close") {
+            checkClose();
             episode = null;
             guard = null;
             return;
         }
         if (action.kind === "seek-live") {
             if (sim.paused) fail("live seek while paused");
+            ownedUntil = null;
             return;
         }
+        if (action.kind === "teardown") ownedUntil = null;
         const stallStep = action.kind === "reload" || ((action.kind === "recover-media" || action.kind === "teardown") && action.cause === "stall");
+        if (action.kind === "recover-media") {
+            if (stallStep && withinRecoveryWindow()) fail(`stall recover-media ${sim.now - (recoveredAt ?? 0)} ms after the last media recovery`);
+            recoveredAt = sim.now;
+            ownedUntil = sim.paused ? null : sim.now + RECOVERY_LIVE_SEEK_WINDOW_MS;
+        }
+        const capped = action.kind === "teardown" && withinRecoveryWindow();
+        if (action.kind === "teardown") recoveredAt = null;
         if (!stallStep) {
             if (action.kind === "teardown") {
                 episode = null;
@@ -691,14 +896,17 @@ function runRandomSequence(seed: number): string | null {
         }
         const ep: EpisodeTrack = episode;
         const rung = ladder[ep.steps.length];
-        if (!rung || rung.step !== action.kind) fail(`${action.kind} out of order after [${ep.steps.join(",")}]`);
-        else if (sim.now - ep.startedAt < rung.atMs) fail(`${action.kind} ${sim.now - ep.startedAt} ms into the episode, before ${rung.atMs}`);
+        const inPlace = rung && (rung.step === action.kind || (capped && rung.step === "recover-media"));
+        if (!inPlace) fail(`${action.kind} out of order after [${ep.steps.join(",")}]`);
+        else if (rung && sim.now - ep.startedAt < rung.atMs) fail(`${action.kind} ${sim.now - ep.startedAt} ms into the episode, before ${rung.atMs}`);
         ep.steps.push(action.kind);
         if (action.kind === "teardown") episode = null;
     };
     sim.afterInput = () => {
         const open = sim.driver.open();
-        if (open && episode === null) episode = { startedAt: sim.now, steps: [] };
+        if (open && episode === null) episode = { startedAt: sim.now, steps: [], confirmed: false };
+        const owned = ownedUntil !== null && sim.now <= ownedUntil;
+        if (sim.driver.ownsPlayhead(sim.now) !== owned) fail(`machine ${owned ? "released" : "holds"} the playhead ${owned ? "inside" : "outside"} a recovery's live seek window`);
         if (!open) {
             episode = null;
             guard = null;
@@ -720,6 +928,31 @@ function runRandomSequence(seed: number): string | null {
         sim.send("waiting");
         if (sim.driver.open()) guard = { from: sim.now, steps: 0 };
     };
+    const seekableView = (): LiveView => {
+        const currentTime = 50 + rand() * 50;
+        const syncPosition = currentTime + 2 + rand() * 13;
+        return { currentTime, syncPosition, ranges: [{ start: currentTime - 1, end: syncPosition + 2 + rand() * 5 }], behindLive: false };
+    };
+    const recoverSeekStall = () => {
+        const idle = cfg.hlsJs && !sim.paused && !sim.driver.open();
+        sim.send("waiting");
+        if (!idle) return;
+        sim.to(sim.now + cfg.graceMs + 2 * lateMs + rand() * 300);
+        sim.send("playing");
+        sim.playTo(sim.now + 500 + rand() * 1500);
+        sim.send("progress", seekableView());
+        sim.to(sim.now + rand() * 450);
+        sim.send("waiting");
+        sim.to(sim.now + rand() * cfg.graceMs * 2);
+    };
+    const strayBeforeFirstStep = () => {
+        const idle = !sim.paused && !sim.driver.open();
+        sim.send("waiting");
+        if (!idle) return;
+        sim.to(sim.now + ladder[0].atMs - 100 - rand() * 800);
+        sim.send("progress");
+        sim.to(sim.now + rand() * cfg.graceMs * 2);
+    };
     for (step = 0; step < RANDOM_STEPS && failure === null; step++) {
         const r = rand();
         if (r < 0.2) sim.send("waiting");
@@ -732,7 +965,9 @@ function runRandomSequence(seed: number): string | null {
         else if (r < 0.64) sim.send("drift-snap");
         else if (r < 0.66) sim.send("error");
         else if (r < 0.72) sim.send("progress", randomView());
-        else if (r < 0.78) spuriousThenReal();
+        else if (r < 0.77) spuriousThenReal();
+        else if (r < 0.82) recoverSeekStall();
+        else if (r < 0.87) strayBeforeFirstStep();
         else sim.to(sim.now + (rand() < 0.2 ? rand() * cfg.graceMs * 2 : rand() * 2500));
         if (episode !== null) {
             const ep: EpisodeTrack = episode;

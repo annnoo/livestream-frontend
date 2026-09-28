@@ -5,7 +5,7 @@ import { HEALTH_CHECK_INTERVAL_MS, HEALTH_STALE_MS, HEALTH_STUCK_MS, WAITING_STA
 import { beginTransport, clearRetryTimer, restartAfterFailure } from "./lifecycle.ts";
 import { hlsLiveSyncPosition, recoverHlsMedia, resumeHlsLoad } from "./hls.ts";
 import { nudgeSeekTarget, stallTeardownMs } from "./stall-escalation.ts";
-import { newStallMachine, stallInput, type LiveView, type StallAction, type StallEvent } from "./stall-machine.ts";
+import { newStallMachine, stallInput, stallOwnsPlayhead, type LiveView, type StallAction, type StallEvent } from "./stall-machine.ts";
 
 let stallTimer: number | null = null;
 let stallGraceMs = WAITING_STALL_MS;
@@ -153,6 +153,10 @@ export function stallGoLive(): void {
 
 export function stallDriftSnap(): void {
     feedCurrentStall("drift-snap");
+}
+
+export function stallRecoveryOwnsPlayhead(): boolean {
+    return stallOwnsPlayhead(stallMachine, Date.now());
 }
 
 export function attachVideoFailureListeners(g: number): void {
