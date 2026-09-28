@@ -11,7 +11,7 @@ import { loadSourceOnce } from "../../player-shared/source-once.ts";
 import { captchaQuery } from "../../captcha.ts";
 import { beginTransport, fullTeardown, goOffline, resetRetryBackoff, restartAfterFailure, setPoster, setState, suspendForPause } from "./lifecycle.ts";
 import { closeQualityUpsell, enterQualityLockedTerminal } from "../quality-upsell.ts";
-import { attachVideoFailureListeners, setStallGraceMs } from "./health.ts";
+import { attachVideoFailureListeners, setStallGraceMs, stallDriftSnap } from "./health.ts";
 import { renderQualityMenu } from "../quality-menu.ts";
 import { parseLockedVariants, streamQualityText } from "../../quality.ts";
 import { clampToAdvertisedWindow, farWindowFor, isPhoneUA, latencyTierFor, latencyWindowFor, type LatencyWindow } from "./latency-window.ts";
@@ -204,7 +204,7 @@ function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | nu
             return;
         }
         if (video.paused && Date.now() - ctx.lastProgressAt > PAUSE_SUSPEND_MS) suspendForPause();
-        if (!video.paused && !ctx.behindLive) trimLowLatency(hls, video, trim, Date.now());
+        if (!video.paused && !ctx.behindLive && trimLowLatency(hls, video, trim, Date.now())) stallDriftSnap();
         updateSeekBar();
     }, HLS_DVR_TICK_MS);
     track(() => window.clearInterval(dvrTimer));

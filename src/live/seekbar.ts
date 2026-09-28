@@ -4,6 +4,7 @@ import { LIVE_EDGE_SNAP_S, SEEK_BAR_MIN_SPAN_S } from "./constants.ts";
 import { formatBehind } from "./format.ts";
 import { bufferedEnd } from "./player/buffered.ts";
 import { hlsLiveSyncPosition } from "./player/hls.ts";
+import { stallGoLive, stallUserSeek } from "./player/health.ts";
 import { activeBufferedRange, behindSeconds, clampToRange, dvrAvailable, isBehindLive, resolveLiveEdge, type BufferedRange } from "./player/dvr-decision.ts";
 import { updateClipButtonVisibility } from "./clip/button.ts";
 
@@ -86,6 +87,7 @@ export function applySeek(pos: number): void {
     if (!range) return;
     const clamped = clampToRange(pos, range);
     video.currentTime = clamped;
+    stallUserSeek();
     ctx.behindLive = isBehindLive(behindSeconds(liveEdge(), clamped), LIVE_EDGE_SNAP_S);
     if (!ctx.behindLive) video.playbackRate = 1;
     updateSeekBar();
@@ -97,6 +99,7 @@ export function goLive(): void {
     if (edge <= 0) return;
     const range = seekableRange();
     video.currentTime = range ? clampToRange(edge, range) : edge;
+    stallGoLive();
     video.playbackRate = 1;
     ctx.behindLive = false;
     void video.play().catch(() => {});

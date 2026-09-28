@@ -9,51 +9,9 @@ export const STALL_RELOAD_FRACTION = 0.5;
 export const STALL_TEARDOWN_FACTOR = 1.5;
 export const MEDIA_RECOVERY_COOLDOWN_MS = 10000;
 export const NUDGE_MIN_AHEAD_S = 0.5;
-export const STALL_RECOVERED_WINDOW_MS = 2000;
 export const RECOVERY_LIVE_SEEK_WINDOW_MS = 30000;
 export const RECOVERY_LIVE_SEEK_MIN_BEHIND_S = 2;
-
-export interface StallEpisode {
-    startedAt: number;
-    progressAt: number;
-    waitingAt: number;
-    taken: number;
-    playingAt: number | null;
-}
-
-export function stallEpisodeOnWaiting(episode: StallEpisode | null, now: number, lastProgressAt: number): StallEpisode {
-    if (!episode || !stallEpisodeContinues(episode, lastProgressAt)) {
-        return { startedAt: now, progressAt: lastProgressAt, waitingAt: now, taken: 0, playingAt: null };
-    }
-    episode.waitingAt = now;
-    return episode;
-}
-
-function stallEpisodeContinues(episode: StallEpisode, lastProgressAt: number): boolean {
-    if (episode.taken === 0) return episode.progressAt === lastProgressAt;
-    return episode.playingAt === null || lastProgressAt - episode.playingAt < STALL_RECOVERED_WINDOW_MS;
-}
-
-export function stallEpisodeOnPlaying(episode: StallEpisode | null, now: number): void {
-    if (episode) episode.playingAt = now;
-}
-
-export type StallCheck =
-    | { kind: "drop" }
-    | { kind: "hold" }
-    | { kind: "wait" }
-    | { kind: "step"; step: StallStep; taken: number };
-
-export function stallCheck(ladder: StallRung[], episode: StallEpisode, now: number, lastProgressAt: number, paused: boolean): StallCheck {
-    if (paused) return { kind: "drop" };
-    const playingSinceWaiting = lastProgressAt > episode.waitingAt && now - lastProgressAt < STALL_RECOVERED_WINDOW_MS;
-    if (playingSinceWaiting) {
-        const resumedBriefly = episode.taken > 0 && episode.playingAt !== null && lastProgressAt - episode.playingAt < STALL_RECOVERED_WINDOW_MS;
-        return { kind: resumedBriefly ? "hold" : "drop" };
-    }
-    const due = stallStepDue(ladder, now - episode.startedAt, episode.taken);
-    return due ? { kind: "step", step: due.step, taken: due.taken } : { kind: "wait" };
-}
+export const RECOVERY_LIVE_SEEK_MIN_AHEAD_S = 2;
 
 export function stallLadder(graceMs: number, hlsJs: boolean): StallRung[] {
     if (!hlsJs) return [{ step: "teardown", atMs: graceMs }];
@@ -66,20 +24,6 @@ export function stallLadder(graceMs: number, hlsJs: boolean): StallRung[] {
 
 export function stallTeardownMs(graceMs: number, hlsJs: boolean): number {
     return hlsJs ? Math.round(graceMs * STALL_TEARDOWN_FACTOR) : graceMs;
-}
-
-export function stallStepDue(ladder: StallRung[], stalledMs: number, taken: number): { step: StallStep; taken: number } | null {
-    let due = -1;
-    for (let i = Math.max(0, taken); i < ladder.length; i++) {
-        if (stalledMs >= ladder[i].atMs) due = i;
-    }
-    if (due < 0) return null;
-    return { step: ladder[due].step, taken: due + 1 };
-}
-
-export function nextStallCheckMs(ladder: StallRung[], stalledMs: number, taken: number): number | null {
-    if (taken >= ladder.length) return null;
-    return Math.max(0, ladder[Math.max(0, taken)].atMs - stalledMs);
 }
 
 export function mediaErrorStep(hlsJs: boolean, sinceLastRecoveryMs: number): "recover-media" | "teardown" {
@@ -106,15 +50,17 @@ export interface RecoveryLiveSeekInput {
     ranges: Array<{ start: number; end: number }>;
     behindLive: boolean;
     paused: boolean;
-    sinceRecoveryMs: number;
 }
 
 export type RecoveryLiveSeek = { kind: "seek"; to: number } | { kind: "wait" } | { kind: "done" };
 
 export function recoveryLiveSeek(input: RecoveryLiveSeekInput): RecoveryLiveSeek {
-    if (input.behindLive || input.paused || input.sinceRecoveryMs > RECOVERY_LIVE_SEEK_WINDOW_MS) return { kind: "done" };
-    if (input.syncPosition === null || !Number.isFinite(input.syncPosition)) return { kind: "wait" };
-    if (input.syncPosition - input.currentTime < RECOVERY_LIVE_SEEK_MIN_BEHIND_S) return { kind: "wait" };
-    const target = nudgeSeekTarget(input.currentTime, input.syncPosition, input.ranges, false);
-    return target === null ? { kind: "wait" } : { kind: "seek", to: target };
+    if (input.behindLive || input.paused) return { kind: "done" };
+    const sync = input.syncPosition;
+    if (sync === null || !Number.isFinite(sync)) return { kind: "wait" };
+    if (sync - input.currentTime < RECOVERY_LIVE_SEEK_MIN_BEHIND_S) return { kind: "wait" };
+    for (const range of input.ranges) {
+        if (sync >= range.start && range.end - sync >= RECOVERY_LIVE_SEEK_MIN_AHEAD_S) return { kind: "seek", to: sync };
+    }
+    return { kind: "wait" };
 }

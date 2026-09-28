@@ -69,7 +69,7 @@ export interface TrimmableMedia {
     currentTime: number;
 }
 
-export function trimLowLatency(hls: TrimmableHls, media: TrimmableMedia, trim: LowLatencyTrim, now: number): void {
+export function trimLowLatency(hls: TrimmableHls, media: TrimmableMedia, trim: LowLatencyTrim, now: number): boolean {
     const syncPos = hls.liveSyncPosition;
     const snapTo = driftSnapPosition(hls.latency, hls.targetLatency, hls.latestLevelDetails?.targetduration ?? Number.NaN, syncPos, syncPos === null ? 0 : bufferedRangeEndAt(media.buffered, syncPos), now - trim.lastDriftSnapAt);
     if (snapTo !== null) {
@@ -85,4 +85,5 @@ export function trimLowLatency(hls: TrimmableHls, media: TrimmableMedia, trim: L
         console.log("live: no stall for a while, lowering target latency to", decayed.toFixed(1), "s");
         hls.targetLatency = decayed;
     }
+    return snapTo !== null;
 }
