@@ -7,6 +7,7 @@ import { readLocalStorage, writeLocalStorage } from "../../storage.ts";
 import { ensureViewerId } from "../../player-shared/viewer-id.ts";
 import { needsCredentials } from "../../player-shared/needs-credentials.ts";
 import { beatUrl, beatVariants, ladderGrew } from "../../player-shared/hls-beat.ts";
+import { loadSourceOnce } from "../../player-shared/source-once.ts";
 import { captchaQuery } from "../../captcha.ts";
 import { beginTransport, fullTeardown, goOffline, resetRetryBackoff, restartAfterFailure, setPoster, setState, suspendForPause } from "./lifecycle.ts";
 import { closeQualityUpsell, enterQualityLockedTerminal } from "../quality-upsell.ts";
@@ -182,10 +183,7 @@ function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | nu
         console.warn("live: hls.js fatal error, restarting", data);
         restartAfterFailure(g);
     });
-    hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        if (!isCurrent(g) || hlsInstance !== hls) return;
-        hls.loadSource(src);
-    });
+    hls.on(Hls.Events.MEDIA_ATTACHED, loadSourceOnce(hls, src, () => isCurrent(g) && hlsInstance === hls));
     hls.attachMedia(video);
     const holdStarted = Date.now();
     const holdTimer = window.setInterval(() => {
@@ -342,10 +340,7 @@ function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: numb
         console.warn("live: hls.js fatal error, restarting", data);
         restartAfterFailure(g);
     });
-    hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        if (!isCurrent(g) || hlsInstance !== hls) return;
-        hls.loadSource(src);
-    });
+    hls.on(Hls.Events.MEDIA_ATTACHED, loadSourceOnce(hls, src, () => isCurrent(g) && hlsInstance === hls));
     hls.attachMedia(video);
     const holdStarted = Date.now();
     const holdTimer = window.setInterval(() => {

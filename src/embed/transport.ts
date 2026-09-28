@@ -6,6 +6,7 @@ import { captchaQuery, getCaptchaToken } from "../captcha.ts";
 import { ensureViewerId } from "../player-shared/viewer-id.ts";
 import { needsCredentials } from "../player-shared/needs-credentials.ts";
 import { beatUrl } from "../player-shared/hls-beat.ts";
+import { loadSourceOnce } from "../player-shared/source-once.ts";
 import { goOffline, resetRetryBackoff, restartAfterFailure, setPlaying } from "./lifecycle.ts";
 import { latencyTierFor } from "../live/player/latency-window.ts";
 import { abrEstimateFor } from "../live/player/far-tier.ts";
@@ -98,10 +99,7 @@ function startHlsJsPlayer(g: number, src: string, rttMs: number | null, primed: 
         if (!data.fatal) return;
         restartAfterFailure(g);
     });
-    hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        if (!isCurrent(g) || hlsInstance !== hls) return;
-        hls.loadSource(src);
-    });
+    hls.on(Hls.Events.MEDIA_ATTACHED, loadSourceOnce(hls, src, () => isCurrent(g) && hlsInstance === hls));
     hls.attachMedia(video);
     void video.play().catch(() => {});
     startHLSBeacon(g);
@@ -120,10 +118,7 @@ function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | nu
         if (!data.fatal) return;
         restartAfterFailure(g);
     });
-    hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        if (!isCurrent(g) || hlsInstance !== hls) return;
-        hls.loadSource(src);
-    });
+    hls.on(Hls.Events.MEDIA_ATTACHED, loadSourceOnce(hls, src, () => isCurrent(g) && hlsInstance === hls));
     hls.attachMedia(video);
     const holdStarted = Date.now();
     const holdTimer = window.setInterval(() => {
