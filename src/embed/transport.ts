@@ -9,6 +9,7 @@ import { goOffline, resetRetryBackoff, restartAfterFailure, setPlaying } from ".
 import { latencyTierFor } from "../live/player/latency-window.ts";
 import { abrEstimateFor } from "../live/player/far-tier.ts";
 import { attachVideoFailureListeners } from "./health.ts";
+import { needsRttFetch, primedMasterLoader, resourceTimingOf, rttFromTiming, type PrimedMaster } from "../live/player/master-probe.ts";
 
 function sendHLSBeat(g: number): void {
     void Promise.all([captchaQuery(), ensureViewerId(ctx.mediaBase, ctx.username)]).then(([tq, vid]) => {
@@ -70,9 +71,10 @@ function startNativeHLS(g: number, src: string): void {
     startHLSBeacon(g);
 }
 
-function startHlsJsPlayer(g: number, src: string, rttMs: number | null): void {
+function startHlsJsPlayer(g: number, src: string, rttMs: number | null, primed: PrimedMaster | null): void {
     const tier = ctx.edgeServed ? "far" : latencyTierFor(rttMs, false);
     const hls = new Hls({
+        ...(primed ? { pLoader: primedMasterLoader(Hls.DefaultConfig.loader, primed) } : {}),
         lowLatencyMode: false,
         abrEwmaDefaultEstimate: abrEstimateFor(tier),
         backBufferLength: 30,
@@ -128,14 +130,22 @@ export function startHLSTransport(g: number): void {
             startNativeHLS(g, src);
             return;
         }
-        let rttMs: number | null = null;
+        let primed: PrimedMaster | null = null;
         try {
-            await fetch(src, { credentials: "include" });
-            const t0 = performance.now();
-            await fetch(src, { credentials: "include" });
-            rttMs = performance.now() - t0;
+            const res = await fetch(src, { credentials: "include" });
+            const body = await res.text();
+            if (res.ok && body) primed = { url: res.url || src, text: body };
         } catch {}
         if (!isCurrent(g)) return;
-        startHlsJsPlayer(g, src, rttMs);
+        let rttMs = primed ? rttFromTiming(resourceTimingOf(src)) : null;
+        if (needsRttFetch("standard", ctx.edgeServed, rttMs)) {
+            try {
+                const t0 = performance.now();
+                await fetch(src, { credentials: "include" });
+                rttMs = performance.now() - t0;
+            } catch {}
+            if (!isCurrent(g)) return;
+        }
+        startHlsJsPlayer(g, src, rttMs, primed);
     });
 }

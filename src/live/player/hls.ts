@@ -18,6 +18,7 @@ import { bufferedAheadOf, STARTUP_RUNWAY_S, startupHoldOver } from "./startup-ho
 import { updateSeekBar } from "../seekbar.ts";
 import { driftSnapPosition } from "./drift-snap.ts";
 import { decayedTargetLatency } from "./stall-decay.ts";
+import { FAILED_PROBE, needsRttFetch, primedMasterLoader, probeOutcome, resourceTimingOf, rttFromTiming, startPathFor, type PrimedMaster } from "./master-probe.ts";
 
 export interface HlsLevelEntry {
     index: number;
@@ -143,11 +144,12 @@ async function buildMasterUrl(): Promise<string> {
 
 const LL_STARTUP_RUNWAY_S = 1;
 
-function startLowLatencyPlayer(g: number, src: string): void {
+function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | null): void {
     console.log("live: hls low latency, parts via cdn, blocking playlist on origin");
     setStallGraceMs(WAITING_STALL_MS);
     const hls = new Hls({
         lowLatencyMode: true,
+        ...(primed ? { pLoader: primedMasterLoader(Hls.DefaultConfig.loader, primed) } : {}),
         abrEwmaDefaultEstimate: abrEstimateFor("mid"),
         backBufferLength: PRUNE_KEEP_S,
         maxLiveSyncPlaybackRate: 1.05,
@@ -288,7 +290,7 @@ function isPhone(): boolean {
     return isPhoneUA(navigator.userAgent, typeof uaData?.mobile === "boolean" ? uaData.mobile : null);
 }
 
-function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: number | null): void {
+function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: number | null, primed: PrimedMaster | null): void {
     const phone = isPhone();
     const edgeServed = ctx.edgeServed;
     const tier = edgeServed ? "far" : latencyTierFor(rttMs, originLL, phone);
@@ -305,6 +307,7 @@ function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: numb
     track(prefetch.clear);
     const hls = new Hls({
         loader: prefetch.loader,
+        ...(primed ? { pLoader: primedMasterLoader(prefetch.loader, primed) } : {}),
         lowLatencyMode: false,
         abrEwmaDefaultEstimate: abrEstimateFor(tier),
         backBufferLength: PRUNE_KEEP_S,
@@ -428,47 +431,44 @@ export function startHLSTransport(g: number): void {
     if (ctx.state !== "offline") setState("buffering");
     void withCaptchaHint(g, buildMasterUrl()).then(async (src) => {
         if (!isCurrent(g)) return;
-        let locked = false;
-        let missing = false;
-        let originLL = false;
+        let probe = FAILED_PROBE;
+        let primed: PrimedMaster | null = null;
         try {
-            const probe = await fetch(src, { credentials: "include" });
-            const body = await probe.text().catch(() => "");
-            if (probe.status === 403) {
-                try {
-                    if ((JSON.parse(body) as { error?: unknown }).error === "quality-locked") locked = true;
-                } catch {}
-            }
-            if (probe.ok) {
-                originLL = body.includes("ll=1") || body.includes("prefetch=1");
+            const res = await fetch(src, { credentials: "include" });
+            const body = await res.text().catch(() => "");
+            probe = probeOutcome(res.status, body);
+            if (probe.playable) {
                 ctx.lockedQualities = parseLockedVariants(body);
+                if (body) primed = { url: res.url || src, text: body };
             }
-            if (probe.status === 404 || probe.status === 410) missing = true;
         } catch {}
         if (!isCurrent(g)) return;
-        if (locked) {
+        const path = startPathFor(probe, ctx.transportKind === "hls-native", lowLatencyWanted());
+        if (path === "quality-locked") {
             enterQualityLockedTerminal();
             return;
         }
-        if (missing) {
+        if (path === "offline") {
             goOffline(g);
             return;
         }
-        if (ctx.transportKind === "hls-native") {
+        if (path === "native") {
             startNativeHLS(g, src);
             return;
         }
-        let rttMs: number | null = null;
-        try {
-            const t0 = performance.now();
-            await fetch(src, { credentials: "include" });
-            rttMs = performance.now() - t0;
-        } catch {}
-        if (!isCurrent(g)) return;
-        if (lowLatencyWanted()) {
-            startLowLatencyPlayer(g, src);
+        if (path === "low-latency") {
+            startLowLatencyPlayer(g, src, primed);
             return;
         }
-        startHlsJsPlayer(g, src, originLL, rttMs);
+        let rttMs = primed ? rttFromTiming(resourceTimingOf(src)) : null;
+        if (needsRttFetch(path, ctx.edgeServed, rttMs)) {
+            try {
+                const t0 = performance.now();
+                await fetch(src, { credentials: "include" });
+                rttMs = performance.now() - t0;
+            } catch {}
+            if (!isCurrent(g)) return;
+        }
+        startHlsJsPlayer(g, src, probe.originLL, rttMs, primed);
     });
 }
