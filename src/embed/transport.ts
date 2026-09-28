@@ -7,6 +7,7 @@ import { ensureViewerId } from "../player-shared/viewer-id.ts";
 import { needsCredentials } from "../player-shared/needs-credentials.ts";
 import { goOffline, resetRetryBackoff, restartAfterFailure, setPlaying } from "./lifecycle.ts";
 import { latencyTierFor } from "../live/player/latency-window.ts";
+import { abrEstimateFor } from "../live/player/far-tier.ts";
 import { attachVideoFailureListeners } from "./health.ts";
 
 function sendHLSBeat(g: number): void {
@@ -73,6 +74,7 @@ function startHlsJsPlayer(g: number, src: string, rttMs: number | null): void {
     const tier = ctx.edgeServed ? "far" : latencyTierFor(rttMs, false);
     const hls = new Hls({
         lowLatencyMode: false,
+        abrEwmaDefaultEstimate: abrEstimateFor(tier),
         backBufferLength: 30,
         ...(tier === "far"
             ? { liveSyncDurationCount: 3, liveMaxLatencyDurationCount: 8 }
