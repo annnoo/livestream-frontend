@@ -145,8 +145,10 @@ const LL_STARTUP_RUNWAY_S = 1;
 
 function startLowLatencyPlayer(g: number, src: string): void {
     console.log("live: hls low latency, parts via cdn, blocking playlist on origin");
+    setStallGraceMs(WAITING_STALL_MS);
     const hls = new Hls({
         lowLatencyMode: true,
+        abrEwmaDefaultEstimate: abrEstimateFor("mid"),
         backBufferLength: PRUNE_KEEP_S,
         maxLiveSyncPlaybackRate: 1.05,
         enableWorker: true,
@@ -162,6 +164,7 @@ function startLowLatencyPlayer(g: number, src: string): void {
             index,
             label: streamQualityText(level.width ?? 0, level.height ?? 0, level.frameRate ?? 0),
         }));
+        applyPreferredLevel(hls);
         renderQualityMenu();
     });
     hls.on(Hls.Events.LEVEL_SWITCHED, () => {
@@ -226,6 +229,13 @@ function startLowLatencyPlayer(g: number, src: string): void {
         updateSeekBar();
     }, HLS_DVR_TICK_MS);
     track(() => window.clearInterval(dvrTimer));
+}
+
+function applyPreferredLevel(hls: Hls): void {
+    const preferred = readLocalStorage(HLS_QUALITY_STORAGE_KEY);
+    if (!preferred) return;
+    const match = hlsLevelEntries.find((entry) => entry.label === preferred);
+    if (match) hls.currentLevel = match.index;
 }
 
 function bufferedRangeEndAt(position: number): number {
@@ -318,11 +328,7 @@ function startHlsJsPlayer(g: number, src: string, originLL: boolean, rttMs: numb
             index,
             label: streamQualityText(level.width ?? 0, level.height ?? 0, level.frameRate ?? 0),
         }));
-        const preferred = readLocalStorage(HLS_QUALITY_STORAGE_KEY);
-        if (preferred) {
-            const match = hlsLevelEntries.find((entry) => entry.label === preferred);
-            if (match) hls.currentLevel = match.index;
-        }
+        applyPreferredLevel(hls);
         renderQualityMenu();
     });
     hls.on(Hls.Events.LEVEL_SWITCHED, () => {
