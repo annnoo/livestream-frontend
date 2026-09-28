@@ -259,7 +259,7 @@ export function stallInput(m: StallMachine, cfg: StallConfig, ev: StallEvent): S
     if (ev.kind === "progress" && ev.now - m.ownSeekAt >= OWN_ACTION_SETTLE_MS) m.progressAt = ev.now;
     if (ev.kind === "timer") m.timerAt = null;
     else if (!CLOSING_EVENTS.has(ev.kind) && m.timerAt !== null && ev.now >= m.timerAt) evaluate(m, ladder, ev.now, effects);
-    apply(m, ladder, cfg, ev, effects);
+    if (!effects.some((action) => action.kind === "teardown")) apply(m, ladder, cfg, ev, effects);
     const deadline = stallDeadline(m, ladder);
     if (deadline === m.timerAt) return effects;
     m.timerAt = deadline;

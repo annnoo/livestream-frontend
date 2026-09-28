@@ -685,6 +685,28 @@ describe("N1: a recover-media, live seek, stall cycle", () => {
     });
 });
 
+describe("an event that finds the teardown overdue", () => {
+    test("does not also recover the media of the transport it tore down", () => {
+        const sim = new Sim(G20);
+        sim.send("waiting");
+        sim.to(20000);
+        expect(sim.steps()).toEqual([[10000, "reload"], [20000, "recover-media"]]);
+        sim.timerLateMs = 100000;
+        sim.to(30500);
+        sim.send("error");
+        expect(sim.log.filter((l) => l.at === 30500).map((l) => l.action)).toEqual([{ kind: "teardown", cause: "stall" }]);
+    });
+
+    test("does not tear down a second time", () => {
+        const sim = new Sim(NATIVE);
+        sim.timerLateMs = 100000;
+        sim.send("waiting");
+        sim.to(9000);
+        sim.send("error");
+        expect(sim.log.map((l) => [l.at, l.action])).toEqual([[9000, { kind: "teardown", cause: "stall" }]]);
+    });
+});
+
 describe("N2: a stray playhead movement just before the first step", () => {
     for (const [name, cfg] of [["G=8", G8], ["G=20", G20], ["native", NATIVE]] as const) {
         test(`${name}: the step is taken at the recheck when playback stayed silent`, () => {
