@@ -16,8 +16,7 @@ import { clampToAdvertisedWindow, farWindowFor, isPhoneUA, latencyTierFor, laten
 import { abrEstimateFor, stallGraceMsFor, startupRunwayFor } from "./far-tier.ts";
 import { bufferedAheadOf, STARTUP_RUNWAY_S, startupHoldOver } from "./startup-hold.ts";
 import { updateSeekBar } from "../seekbar.ts";
-import { driftSnapPosition } from "./drift-snap.ts";
-import { decayedTargetLatency } from "./stall-decay.ts";
+import { LL_STARTUP_RUNWAY_S, lowLatencyAvailable as lowLatencyAvailableFor, lowLatencyHlsConfig, masterMode, newLowLatencyTrim, trimLowLatency } from "../../player-shared/low-latency.ts";
 import { FAILED_PROBE, needsRttFetch, primedMasterLoader, probeOutcome, resourceTimingOf, rttFromTiming, startPathFor, type PrimedMaster } from "./master-probe.ts";
 
 export interface HlsLevelEntry {
@@ -119,7 +118,7 @@ function withCaptchaHint<T>(g: number, p: Promise<T>): Promise<T> {
 }
 
 export function lowLatencyAvailable(): boolean {
-    return ctx.lowLatencyEntitled && !ctx.edgeServed;
+    return lowLatencyAvailableFor(ctx.lowLatencyEntitled, ctx.edgeServed);
 }
 
 export function lowLatencyPreferred(): boolean {
@@ -138,26 +137,13 @@ export function setLowLatencyPreferred(on: boolean): void {
 
 async function buildMasterUrl(): Promise<string> {
     const tq = await captchaQuery();
-    const mode = lowLatencyWanted() ? "ll=1" : "prefetch=1";
-    return `${ctx.mediaBase}/hls/${encodeURIComponent(ctx.username)}/master.m3u8?${mode}${tq}`;
+    return `${ctx.mediaBase}/hls/${encodeURIComponent(ctx.username)}/master.m3u8?${masterMode(lowLatencyWanted())}${tq}`;
 }
-
-const LL_STARTUP_RUNWAY_S = 1;
 
 function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | null): void {
     console.log("live: hls low latency, parts via cdn, blocking playlist on origin");
     setStallGraceMs(WAITING_STALL_MS);
-    const hls = new Hls({
-        lowLatencyMode: true,
-        ...(primed ? { pLoader: primedMasterLoader(Hls.DefaultConfig.loader, primed) } : {}),
-        abrEwmaDefaultEstimate: abrEstimateFor("mid"),
-        backBufferLength: PRUNE_KEEP_S,
-        maxLiveSyncPlaybackRate: 1.05,
-        enableWorker: true,
-        xhrSetup: (xhr, url) => {
-            xhr.withCredentials = needsCredentials(url, ctx.mediaBase, location.origin);
-        },
-    });
+    const hls = new Hls(lowLatencyHlsConfig(Hls.DefaultConfig.loader, primed, PRUNE_KEEP_S, (url) => needsCredentials(url, ctx.mediaBase, location.origin)));
     hlsInstance = hls;
     hlsLevelEntries = [];
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -173,10 +159,10 @@ function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | nu
         if (!isCurrent(g) || hlsInstance !== hls) return;
         renderQualityMenu();
     });
-    let lastTargetChangeAt = Date.now();
+    const trim = newLowLatencyTrim(Date.now());
     hls.on(Hls.Events.ERROR, (_event, data) => {
         if (!isCurrent(g) || hlsInstance !== hls) return;
-        if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) lastTargetChangeAt = Date.now();
+        if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) trim.lastTargetChangeAt = Date.now();
         if (data.details === Hls.ErrorDetails.BUFFER_FULL_ERROR) return;
         if (!data.fatal) return;
         console.warn("live: hls.js fatal error, restarting", data);
@@ -204,30 +190,13 @@ function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | nu
     track(() => window.clearInterval(holdTimer));
     startHLSBeacon(g);
     startLadderWatch(g, src);
-    let lastDriftSnapAt = 0;
     const dvrTimer = window.setInterval(() => {
         if (!isCurrent(g) || hlsInstance !== hls) {
             window.clearInterval(dvrTimer);
             return;
         }
         if (video.paused && Date.now() - ctx.lastProgressAt > PAUSE_SUSPEND_MS) suspendForPause();
-        if (!video.paused && !ctx.behindLive) {
-            const syncPos = hls.liveSyncPosition;
-            const snapTo = driftSnapPosition(hls.latency, hls.targetLatency, hls.latestLevelDetails?.targetduration ?? Number.NaN, syncPos, syncPos === null ? 0 : bufferedRangeEndAt(syncPos), Date.now() - lastDriftSnapAt);
-            if (snapTo !== null) {
-                lastDriftSnapAt = Date.now();
-                console.log("live: drifted", hls.latency.toFixed(1), "s behind, target", hls.targetLatency?.toFixed(1), "s, snapping to live");
-                video.currentTime = snapTo;
-            }
-            const details = hls.latestLevelDetails;
-            const base = details ? details.partHoldBack || details.holdBack : Number.NaN;
-            const decayed = decayedTargetLatency(hls.targetLatency, base, Date.now() - lastTargetChangeAt);
-            if (decayed !== null) {
-                lastTargetChangeAt = Date.now();
-                console.log("live: no stall for a while, lowering target latency to", decayed.toFixed(1), "s");
-                hls.targetLatency = decayed;
-            }
-        }
+        if (!video.paused && !ctx.behindLive) trimLowLatency(hls, video, trim, Date.now());
         updateSeekBar();
     }, HLS_DVR_TICK_MS);
     track(() => window.clearInterval(dvrTimer));
@@ -238,13 +207,6 @@ function applyPreferredLevel(hls: Hls): void {
     if (!preferred) return;
     const match = hlsLevelEntries.find((entry) => entry.label === preferred);
     if (match) hls.currentLevel = match.index;
-}
-
-function bufferedRangeEndAt(position: number): number {
-    for (let i = 0; i < video.buffered.length; i++) {
-        if (position >= video.buffered.start(i) && position <= video.buffered.end(i)) return video.buffered.end(i);
-    }
-    return 0;
 }
 
 function wireVideoLifecycle(g: number): void {
