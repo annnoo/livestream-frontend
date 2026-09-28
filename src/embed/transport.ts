@@ -10,7 +10,7 @@ import { loadSourceOnce } from "../player-shared/source-once.ts";
 import { goOffline, resetRetryBackoff, restartAfterFailure, setPlaying } from "./lifecycle.ts";
 import { latencyTierFor } from "../live/player/latency-window.ts";
 import { abrEstimateFor } from "../live/player/far-tier.ts";
-import { attachVideoFailureListeners } from "./health.ts";
+import { attachVideoFailureListeners, useLowLatencyStallTimings } from "./health.ts";
 import { browserResourceTimingEnv, needsRttFetch, primedMasterLoader, RESOURCE_TIMING_WAIT_MS, rttFromTiming, watchResourceTiming, type PrimedMaster } from "../live/player/master-probe.ts";
 import { bufferedAheadOf, startupHoldOver } from "../live/player/startup-hold.ts";
 import { LL_STARTUP_RUNWAY_S, LL_TRIM_TICK_MS, lowLatencyChosen, lowLatencyForToken, lowLatencyHlsConfig, masterMode, newLowLatencyTrim, trimLowLatency } from "../player-shared/low-latency.ts";
@@ -107,7 +107,8 @@ function startHlsJsPlayer(g: number, src: string, rttMs: number | null, primed: 
 
 const EMBED_BACK_BUFFER_S = 30;
 
-function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | null): void {
+function startLowLatencyPlayer(g: number, src: string, primed: PrimedMaster | null, edgeServed: boolean): void {
+    useLowLatencyStallTimings(edgeServed);
     const hls = new Hls(lowLatencyHlsConfig(Hls.DefaultConfig.loader, primed, EMBED_BACK_BUFFER_S, (url) => needsCredentials(url, ctx.mediaBase, location.origin)));
     hlsInstance = hls;
     const trim = newLowLatencyTrim(Date.now());
@@ -186,7 +187,7 @@ export function startHLSTransport(g: number): void {
         }
         if (lowLatencyChosen(requested, edgeServed, primed?.text ?? "")) {
             probeTiming.stop();
-            startLowLatencyPlayer(g, src, primed);
+            startLowLatencyPlayer(g, src, primed, edgeServed);
             return;
         }
         let rttMs = primed ? rttFromTiming(await probeTiming.settle(RESOURCE_TIMING_WAIT_MS)) : null;

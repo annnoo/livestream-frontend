@@ -1,4 +1,16 @@
 import type { EmbedPlaybackState } from "./context.ts";
+import { lowLatencyStallGraceMs } from "../live/player/far-tier.ts";
+import { recoveryDeadlineMs } from "../live/player/recovery-deadline.ts";
+
+export interface EmbedStallTimings {
+    waitingMs: number;
+    staleMs: number;
+}
+
+export function embedStallTimings(lowLatency: boolean, edgeServed: boolean, waitingMs: number, staleMs: number): EmbedStallTimings {
+    const graceMs = lowLatency ? lowLatencyStallGraceMs(edgeServed, waitingMs) : waitingMs;
+    return { waitingMs: graceMs, staleMs: recoveryDeadlineMs(staleMs, graceMs) };
+}
 
 export type EmbedHealthRestartReason = "stuck-connecting" | "stale-progress";
 

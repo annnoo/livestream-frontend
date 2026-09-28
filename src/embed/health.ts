@@ -1,11 +1,16 @@
 import { video } from "./dom.ts";
 import { ctx, isCurrent, track } from "./context.ts";
 import { HEALTH_CHECK_INTERVAL_MS, HEALTH_STALE_MS, HEALTH_STUCK_MS, WAITING_STALL_MS } from "./constants.ts";
-import { decideEmbedHealth } from "./health-decision.ts";
+import { decideEmbedHealth, embedStallTimings } from "./health-decision.ts";
 import { restartAfterFailure } from "./lifecycle.ts";
 
 let waitingTimer: number | null = null;
 let healthTimer: number | null = null;
+let stallTimings = embedStallTimings(false, false, WAITING_STALL_MS, HEALTH_STALE_MS);
+
+export function useLowLatencyStallTimings(edgeServed: boolean): void {
+    stallTimings = embedStallTimings(true, edgeServed, WAITING_STALL_MS, HEALTH_STALE_MS);
+}
 
 export function clearWaitingTimer(): void {
     if (waitingTimer === null) return;
@@ -21,7 +26,7 @@ export function healthCheck(): void {
         lastStateChangeAt: ctx.lastStateChangeAt,
         lastProgressAt: ctx.lastProgressAt,
         paused: video.paused,
-        staleMs: HEALTH_STALE_MS,
+        staleMs: stallTimings.staleMs,
         stuckMs: HEALTH_STUCK_MS,
     });
     if (reason) restartAfterFailure(ctx.gen);
@@ -39,6 +44,7 @@ export function stopHealthTimer(): void {
 }
 
 export function attachVideoFailureListeners(g: number): void {
+    stallTimings = embedStallTimings(false, false, WAITING_STALL_MS, HEALTH_STALE_MS);
     const onError = () => {
         if (isCurrent(g)) restartAfterFailure(g);
     };
@@ -51,7 +57,7 @@ export function attachVideoFailureListeners(g: number): void {
             if (!isCurrent(g)) return;
             const hasProgressed = Math.abs(video.currentTime - waitingAt) > 0.01;
             if (!hasProgressed || video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) restartAfterFailure(g);
-        }, WAITING_STALL_MS);
+        }, stallTimings.waitingMs);
     };
     const onProgress = () => {
         if (!isCurrent(g)) return;
