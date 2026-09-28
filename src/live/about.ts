@@ -63,7 +63,7 @@ let isOwner = false;
 
 export function applyChannelIdentity(profile: Profile | null): void {
     channelAvatarWrapEl.replaceChildren();
-    if (profile) channelAvatarWrapEl.appendChild(buildAvatar(profile));
+    if (profile) channelAvatarWrapEl.appendChild(buildAvatar(profile, true));
 }
 
 function buildPanelCard(panel: ProfilePanel, owner: boolean): HTMLElement {

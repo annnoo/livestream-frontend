@@ -90,20 +90,25 @@ export function offlineArtUrl(profile: Profile): string | null {
     return `/api/live/profile/${encodeURIComponent(profile.username)}/banner?v=${profile.bannerVersion}`;
 }
 
-export function buildAvatar(profile: Profile): HTMLElement {
+export function buildAvatarFallback(username: string): HTMLElement {
+    const fallback = document.createElement("div");
+    fallback.className = "profile-card-avatar-fallback";
+    fallback.style.backgroundColor = hashColor(username);
+    fallback.textContent = username.slice(0, 1).toUpperCase();
+    return fallback;
+}
+
+export function buildAvatar(profile: Profile, eager = false): HTMLElement {
     if (profile.hasAvatar) {
         const img = document.createElement("img");
         img.className = "profile-card-avatar";
-        img.src = avatarUrl(profile);
         img.alt = profile.username;
-        img.loading = "lazy";
+        img.loading = eager ? "eager" : "lazy";
+        img.addEventListener("error", () => img.replaceWith(buildAvatarFallback(profile.username)), { once: true });
+        img.src = avatarUrl(profile);
         return img;
     }
-    const fallback = document.createElement("div");
-    fallback.className = "profile-card-avatar-fallback";
-    fallback.style.backgroundColor = hashColor(profile.username);
-    fallback.textContent = profile.username.slice(0, 1).toUpperCase();
-    return fallback;
+    return buildAvatarFallback(profile.username);
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
