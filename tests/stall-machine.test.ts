@@ -53,6 +53,7 @@ class Sim {
     onSnap: () => void = () => {};
     beforeInput: (kind: EventKind, view: LiveView) => void = () => {};
     afterInput: () => void = () => {};
+    onInput: (actions: StallAction[]) => void = () => {};
 
     constructor(readonly cfg: StallConfig) {
         this.driver = makeDriver(cfg, false);
@@ -72,6 +73,7 @@ class Sim {
         const ev = (kind === "progress" ? { kind, now: this.now, view } : { kind, now: this.now }) as StallEvent;
         this.sending.push(kind);
         const actions = this.driver.input(ev);
+        this.onInput(actions);
         for (const action of actions) this.carry(action);
         this.sending.pop();
         this.afterInput();
@@ -735,6 +737,38 @@ describe("an event that finds the teardown overdue", () => {
     });
 });
 
+describe("an error that finds the recover-media step overdue", () => {
+    test("recovers the media once for the step and the error together", () => {
+        const sim = new Sim(G20);
+        sim.timerLateMs = 3000;
+        sim.send("waiting");
+        sim.to(24000);
+        expect(sim.steps()).toEqual([[13000, "reload"]]);
+        sim.send("error");
+        expect(sim.log.filter((l) => l.at === 24000).map((l) => l.action)).toEqual([{ kind: "recover-media", cause: "stall" }]);
+    });
+
+    test("a later error inside the cooldown still tears down", () => {
+        const sim = new Sim(G20);
+        sim.timerLateMs = 3000;
+        sim.send("waiting");
+        sim.to(24000);
+        sim.send("error");
+        sim.to(25000);
+        sim.send("error");
+        expect(sim.steps()).toEqual([[13000, "reload"], [24000, "recover-media"], [25000, "teardown"]]);
+    });
+
+    test("an error after an overdue reload still recovers the media", () => {
+        const sim = new Sim(G20);
+        sim.timerLateMs = 3000;
+        sim.send("waiting");
+        sim.to(11000);
+        sim.send("error");
+        expect(sim.log.filter((l) => l.at === 11000).map((l) => l.action)).toEqual([{ kind: "reload" }, { kind: "recover-media", cause: "error" }]);
+    });
+});
+
 describe("N2: a stray playhead movement just before the first step", () => {
     for (const [name, cfg] of [["G=8", G8], ["G=20", G20], ["edge LL", EDGE_LL], ["native", NATIVE]] as const) {
         test(`${name}: the step is taken at the recheck when playback stayed silent`, () => {
@@ -873,7 +907,7 @@ function runRandomSequence(seed: number): string | null {
     const cfg = pick([G8, G20, EDGE_LL, NATIVE]);
     const ladder = stallLadder(cfg.graceMs, cfg.hlsJs);
     const teardownRung = ladder[ladder.length - 1].atMs;
-    const lateMs = pick([0, 0, 40, 150]);
+    const lateMs = pick([0, 0, 40, 150, 1000, 5000]);
     const bound = teardownRung + ladder.length * (STALL_RECHECK_MS + 2 * lateMs) + 1000;
     const sim = new Sim(cfg);
     sim.timerLateMs = lateMs;
@@ -900,6 +934,10 @@ function runRandomSequence(seed: number): string | null {
         if (kind === "playing" && episode !== null) episode.confirmed = true;
         if (kind === "pause" || kind === "seek" || kind === "go-live" || kind === "drift-snap") ownedUntil = null;
         if (kind === "progress" && liveView.behindLive) ownedUntil = null;
+    };
+    sim.onInput = (actions) => {
+        const recoveries = actions.filter((action) => action.kind === "recover-media" || action.kind === "teardown");
+        if (recoveries.length > 1) fail(`${recoveries.map((action) => action.kind).join(" and ")} in one input`);
     };
     sim.onSnap = () => {
         if (ownedUntil !== null && sim.now <= ownedUntil) fail("edge snap on play while the recovery owns the playhead");
@@ -1003,6 +1041,13 @@ function runRandomSequence(seed: number): string | null {
         sim.send("progress");
         sim.to(sim.now + rand() * cfg.graceMs * 2);
     };
+    const errorOnOverdueStep = () => {
+        const idle = !sim.paused && !sim.driver.open();
+        sim.send("waiting");
+        if (!idle) return;
+        sim.to(sim.now + pick(ladder).atMs + rand() * lateMs);
+        sim.send("error");
+    };
     for (step = 0; step < RANDOM_STEPS && failure === null; step++) {
         const r = rand();
         if (r < 0.2) sim.send("waiting");
@@ -1018,6 +1063,7 @@ function runRandomSequence(seed: number): string | null {
         else if (r < 0.77) spuriousThenReal();
         else if (r < 0.82) recoverSeekStall();
         else if (r < 0.87) strayBeforeFirstStep();
+        else if (r < 0.9) errorOnOverdueStep();
         else sim.to(sim.now + (rand() < 0.2 ? rand() * cfg.graceMs * 2 : rand() * 2500));
         if (episode !== null) {
             const ep: EpisodeTrack = episode;

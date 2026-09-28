@@ -253,13 +253,17 @@ function apply(m: StallMachine, ladder: StallRung[], cfg: StallConfig, ev: Stall
     }
 }
 
+function overdueStepAnswers(ev: StallEvent, effects: StallAction[]): boolean {
+    return effects.some((action) => action.kind === "teardown" || (ev.kind === "error" && action.kind === "recover-media"));
+}
+
 export function stallInput(m: StallMachine, cfg: StallConfig, ev: StallEvent): StallAction[] {
     const ladder = stallLadder(cfg.graceMs, cfg.hlsJs);
     const effects: StallAction[] = [];
     if (ev.kind === "progress" && ev.now - m.ownSeekAt >= OWN_ACTION_SETTLE_MS) m.progressAt = ev.now;
     if (ev.kind === "timer") m.timerAt = null;
     else if (!CLOSING_EVENTS.has(ev.kind) && m.timerAt !== null && ev.now >= m.timerAt) evaluate(m, ladder, ev.now, effects);
-    if (!effects.some((action) => action.kind === "teardown")) apply(m, ladder, cfg, ev, effects);
+    if (!overdueStepAnswers(ev, effects)) apply(m, ladder, cfg, ev, effects);
     const deadline = stallDeadline(m, ladder);
     if (deadline === m.timerAt) return effects;
     m.timerAt = deadline;
